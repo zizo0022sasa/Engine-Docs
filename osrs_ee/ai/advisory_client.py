@@ -192,9 +192,9 @@ class AIAdvisoryClient:
                 "requires_human_approval": bool(parsed["requires_human_approval"]),
             }
             return validate_ai_proposal(candidate)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError, ContractValidationError) as exc:
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError, ContractValidationError):
             return self._fallback_proposal(
                 incident_id=incident_id,
                 observation=observation,
-                reason=f"Invalid or unsafe LLM output rejected ({exc})",
+                reason="Invalid or policy-rejected LLM output",
             )
