@@ -1,5 +1,62 @@
-# OS Metadata
-Thumbs.db
-Desktop.ini
-.DS_Store
-*.tmp
+# ==============================================================================
+# OSRS_ee — Strict Security & Runtime Artifact Exclusions (PR-00 / T01 / T02)
+# ==============================================================================
+
+# 1. Secrets, Credentials, Keys & Environment Files (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*keys*.txt
+*secret*
+!osrs_ee/security/*
+!tests/*secret*
+!docs/*SECURITY*
+credentials.properties
+*.agent-token
+.agent-token
+.agent.sock
+spoofed-device-ids.properties
+*hwid*.properties
+
+# 2. Account Inputs, Databases, Journals & Mutable State Stores
+accounts.txt
+accounts_*.txt
+*accounts_database*.json
+state_snapshot.json
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.journal
+*.lock
+
+# 3. Isolated Client Sandboxes, RuneLite Homes, Logs, Screenshots & Outbox
+sandboxes/
+OSRS_Sandboxes/
+.runelite/
+jagexcache/
+logs/
+outbox/
+staging/
+quarantine/
+triage/
+*.log
+*.log.*
+
+# 4. Python / Java / Test / Build Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.gradle/
+target/
+*.class
+*.jar
