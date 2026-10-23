@@ -46,9 +46,9 @@
 
 | ID | المهمة | الأولوية | المصادر | الاختبارات | الحالة | الدليل / الكوميت |
 | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-| **`TASK-04-01`** | بناء `GameAdapterGate` للتحقق من هوية العميل والإيجار والجيل وقائمة المسارات البيضاء ورايات تعطيل التليمتري، وبناء `FakeGameAdapter` القابل لحقن الأعطال عند كل حد. | `P0` | `AUD-03`, `AUD-05`, `AUD-07`, `AUD-12` | `T04`, `T06`, `T07` | `PLANNED` | بعد `PR-03` |
-| **`TASK-04-02`** | بناء `TaskWorker` (دورة القراءة ◄ التحقق المسبق ◄ تدوين النية ◄ الإرسال ◄ التحقق البعدي، عقد البنك `execute_bank_turnaround` المحقق، فحص `Varp 281`، رفض `INSUFFICIENT_RESOURCES` بطلب `REPLAN`، وحجر `DEATH_QUARANTINE`). | `P0` | `AUD-16`, `AUD-17`, `AUD-19`, `AUD-20`, `AUD-21` | `T10`, `T12`, `T13`, `T21`, `T23` | `PLANNED` | بعد `TASK-04-01` |
-| **`TASK-04-03`** | بناء `SingleSlotSupervisor` بمستويات الإيقاف الثلاثة (`pause / drain / abort` وكبح `AutoLoginScript`)، وحارس `game_tick` مقابل ثبات الإحداثيات وقاطع دائرة إعادة التشغيل. | `P1` | `AUD-22`, `AUD-23`, `AUD-24` | `T16`, `T17`, `T27` | `PLANNED` | بعد `TASK-04-02` |
+| **`TASK-04-01`** | بناء `GameAdapterGate` للتحقق من هوية العميل والإيجار والجيل وقائمة المسارات البيضاء ورايات تعطيل التليمتري، وبناء `FakeGameAdapter` القابل لحقن الأعطال عند كل حد. | `P0` | `AUD-03`, `AUD-05`, `AUD-07`, `AUD-12` | `T04`, `T06`, `T07` | `VERIFIED` | `PR-04` (`test_pr04_fake_runtime.py`) |
+| **`TASK-04-02`** | بناء `TaskWorker` (دورة القراءة ◄ التحقق المسبق ◄ تدوين النية ◄ الإرسال ◄ التحقق البعدي، عقد البنك `execute_bank_turnaround` المحقق، فحص `Varp 281`، رفض `INSUFFICIENT_RESOURCES` بطلب `REPLAN`، وحجر `DEATH_QUARANTINE`). | `P0` | `AUD-16`, `AUD-17`, `AUD-19`, `AUD-20`, `AUD-21` | `T10`, `T12`, `T13`, `T21`, `T23` | `VERIFIED` | `PR-04` (`test_pr04_fake_runtime.py`) |
+| **`TASK-04-03`** | بناء `SingleSlotSupervisor` بمستويات الإيقاف الثلاثة (`pause / drain / abort` وكبح `AutoLoginScript`)، وحارس `game_tick` مقابل ثبات الإحداثيات وقاطع دائرة إعادة التشغيل. | `P1` | `AUD-22`, `AUD-23`, `AUD-24` | `T16`, `T17`, `T27` | `VERIFIED` | `PR-04` (`test_pr04_fake_runtime.py`) |
 
 ---
 

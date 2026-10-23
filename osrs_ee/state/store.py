@@ -945,7 +945,8 @@ class StateStore:
     # ------------------------------------------------------------------
     # RBAC & Single-Use Bound Approvals (AUD-04 / T03, T09)
     # ------------------------------------------------------------------
-    def grant_operator_role(self, *, user_id: int, chat_id: int, role: OperatorRole) -> None:
+    def grant_operator_role(self, *, user_id: int, chat_id: int, role: OperatorRole | str) -> None:
+        role_enum = OperatorRole(role)
         with self._lock:
             try:
                 self._tx_begin()
@@ -955,7 +956,7 @@ class StateStore:
                     VALUES (?, ?, ?)
                     ON CONFLICT(user_id, chat_id) DO UPDATE SET role = excluded.role
                     """,
-                    (user_id, chat_id, role.value),
+                    (user_id, chat_id, role_enum.value),
                 )
                 self._tx_commit()
             except Exception:

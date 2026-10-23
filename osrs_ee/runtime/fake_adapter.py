@@ -1,0 +1,236 @@
+"""Hermetic in-memory Microbot AgentServer simulator with fault-injection hooks (PR-04)."""
+
+from __future__ import annotations
+
+import copy
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from osrs_ee.contracts.models import validate_observation
+
+
+class FakeGameAdapter:
+    """Deterministic fake client instance supporting fault injection at every boundary."""
+
+    def __init__(
+        self,
+        *,
+        account_id: str,
+        session_id: str,
+        session_epoch: int,
+        client_instance_id: str | None = None,
+        jvm_flags: list[str] | None = None,
+        tutorial_varp_281: int = 1000,
+        quest_points: int = 10,
+        total_level: int = 110,
+        playtime_minutes: int = 1250,
+        skills: dict[str, int] | None = None,
+        bank_items: list[dict[str, Any]] | None = None,
+        inventory_items: list[dict[str, Any]] | None = None,
+        equipment_items: list[str] | None = None,
+    ) -> None:
+        self.account_id = account_id
+        self.session_id = session_id
+        self.session_epoch = session_epoch
+        self.client_instance_id = client_instance_id or f"fake_jvm_{uuid.uuid4().hex[:8]}"
+        self.jvm_flags = list(
+            jvm_flags
+            if jvm_flags is not None
+            else ["--disable-telemetry", "-Dmicrobot.disableTelemetry=true", "-Xmx768m"]
+        )
+        self.alive = True
+        self.plugin_running = False
+        self.auto_login_suppressed = False
+        self.logged_in = True
+        self.player_dead = False
+
+        self.game_tick = 100
+        self.freeze_ticks = False
+        self.world = 308
+        self.position = {"x": 3092, "y": 3243, "plane": 0}
+        self.tutorial_varp_281 = tutorial_varp_281
+        # Deliberately keep varbits namespace separate from varps (T10 proof!)
+        self.varbits: dict[int, int] = {281: 0}
+        self.quest_points = quest_points
+        self.total_level = total_level
+        self.playtime_minutes = playtime_minutes
+        self.skills = dict(skills or {"woodcutting": 35, "attack": 1, "fishing": 25, "mining": 20})
+
+        self.bank_open = False
+        self.bank_pin_prompt_open = False
+        self.bank_items: list[dict[str, Any]] = copy.deepcopy(bank_items or [])
+        self.inventory_items: list[dict[str, Any]] = copy.deepcopy(inventory_items or [])
+        self.equipment_items: list[str] = list(equipment_items or [])
+
+        # Fault-injection toggles
+        self.drop_response_after_effect_once = False
+        self.fail_withdraw_silently = False
+        self.hang_on_logout_sec: float = 0.0
+        self._obs_seq = 0
+
+    def advance_tick(self, steps: int = 1) -> None:
+        if self.alive and not self.freeze_ticks:
+            self.game_tick += steps
+
+    def kill_process_tree(self) -> None:
+        self.alive = False
+        self.plugin_running = False
+
+    def read_varbit(self, varbit_id: int) -> int:
+        """Reading Varbit 281 returns 0 even when Tutorial Varp 281 == 1000 (AUD-17 / T10)."""
+        return self.varbits.get(varbit_id, 0)
+
+    def read_observation(self, *, monotonic_ms: int = 1000) -> dict[str, Any]:
+        if not self.alive:
+            raise ConnectionError("Client JVM process is terminated")
+        self.advance_tick(1)
+        self._obs_seq += 1
+
+        # Critical invariant (T10): BankHandler only knows bank items when bank is open!
+        if self.bank_open and not self.bank_pin_prompt_open:
+            bank_quality = "KNOWN"
+            bank_list = copy.deepcopy(self.bank_items)
+        else:
+            bank_quality = "UNKNOWN"
+            bank_list = None
+
+        used_slots = sum(1 if not it["noted"] and it["item_id"] != 995 else 1 for it in self.inventory_items)
+        obs = {
+            "schema_version": "1.0",
+            "observation_id": f"obs_{self._obs_seq:06d}",
+            "observed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "monotonic_ms": monotonic_ms,
+            "account_id": self.account_id,
+            "session_id": self.session_id,
+            "client_instance_id": self.client_instance_id,
+            "session_epoch": self.session_epoch,
+            "login_state": "LOGGED_IN" if self.logged_in else "LOGIN_SCREEN",
+            "game_tick": self.game_tick,
+            "world": self.world,
+            "position": {
+                "x": self.position["x"],
+                "y": self.position["y"],
+                "plane": self.position["plane"],
+                "quality": "KNOWN",
+            },
+            "tutorial_varp_281": {"value": self.tutorial_varp_281, "quality": "KNOWN"},
+            "quest_points": {"value": self.quest_points, "quality": "KNOWN"},
+            "total_level": {"value": self.total_level, "quality": "KNOWN"},
+            "playtime_minutes": {"value": self.playtime_minutes, "quality": "KNOWN"},
+            "dialogue_open": False,
+            "bank": {
+                "is_open": self.bank_open,
+                "pin_prompt_open": self.bank_pin_prompt_open,
+                "items_quality": bank_quality,
+                "items": bank_list,
+            },
+            "inventory": {
+                "free_slots": max(0, 28 - used_slots),
+                "quality": "KNOWN",
+                "items": copy.deepcopy(self.inventory_items),
+            },
+        }
+        return validate_observation(obs)
+
+    def execute_raw_command(self, command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.alive:
+            raise ConnectionError("Client JVM process is terminated")
+
+        if command_type == "BANK_OPEN":
+            self.bank_open = True
+            return {"ok": True}
+
+        if command_type == "BANK_CLOSE":
+            self.bank_open = False
+            return {"ok": True}
+
+        if command_type == "BANK_DEPOSIT_INVENTORY":
+            if not self.bank_open or self.bank_pin_prompt_open:
+                return {"ok": False, "reason": "bank_not_accessible"}
+            for inv_it in self.inventory_items:
+                self._add_to_bank(inv_it)
+            self.inventory_items.clear()
+            return {"ok": True}
+
+        if command_type == "BANK_DEPOSIT_EQUIPMENT":
+            if not self.bank_open or self.bank_pin_prompt_open:
+                return {"ok": False, "reason": "bank_not_accessible"}
+            self.equipment_items.clear()
+            return {"ok": True}
+
+        if command_type == "BANK_WITHDRAW_ITEM":
+            if not self.bank_open or self.bank_pin_prompt_open:
+                return {"ok": False, "reason": "bank_not_accessible"}
+            if self.fail_withdraw_silently:
+                # Simulates Microbot withdrawX returning False while caller might ignore return
+                return {"ok": False, "reason": "withdraw_failed"}
+
+            target_name = payload.get("name")
+            target_id = payload.get("item_id")
+            qty = int(payload["quantity"])
+            noted = bool(payload.get("noted", False))
+
+            for b_it in self.bank_items:
+                if (target_name and b_it["name"] == target_name) or (
+                    target_id is not None and b_it["item_id"] == target_id
+                ):
+                    if b_it["quantity"] < qty:
+                        return {"ok": False, "reason": "insufficient_quantity"}
+                    b_it["quantity"] -= qty
+                    if b_it["quantity"] == 0:
+                        self.bank_items.remove(b_it)
+                    self._add_to_inventory(
+                        {
+                            "item_id": b_it["item_id"],
+                            "name": b_it["name"],
+                            "quantity": qty,
+                            "noted": noted,
+                        }
+                    )
+                    if self.drop_response_after_effect_once:
+                        self.drop_response_after_effect_once = False
+                        raise TimeoutError("Simulated HTTP drop AFTER server applied bank withdrawal")
+                    return {"ok": True}
+            return {"ok": False, "reason": "item_not_found"}
+
+        if command_type == "PLUGIN_START":
+            self.plugin_running = True
+            return {"ok": True}
+
+        if command_type == "PLUGIN_STOP":
+            self.plugin_running = False
+            return {"ok": True}
+
+        if command_type == "SAFE_LOGOUT":
+            if self.hang_on_logout_sec > 0:
+                import time
+                time.sleep(self.hang_on_logout_sec)
+                raise TimeoutError("SAFE_LOGOUT hung past deadline")
+            self.plugin_running = False
+            self.auto_login_suppressed = True
+            self.logged_in = False
+            return {"ok": True}
+
+        raise ValueError(f"Unsupported command_type on FakeGameAdapter: {command_type}")
+
+    def _add_to_bank(self, item: dict[str, Any]) -> None:
+        for b in self.bank_items:
+            if b["item_id"] == item["item_id"]:
+                b["quantity"] += item["quantity"]
+                return
+        self.bank_items.append(
+            {
+                "item_id": item["item_id"],
+                "name": item["name"],
+                "quantity": item["quantity"],
+                "noted": False,
+            }
+        )
+
+    def _add_to_inventory(self, item: dict[str, Any]) -> None:
+        for inv in self.inventory_items:
+            if inv["item_id"] == item["item_id"] and inv["noted"] == item["noted"]:
+                inv["quantity"] += item["quantity"]
+                return
+        self.inventory_items.append(dict(item))
