@@ -1,17 +1,18 @@
 # 🛡️ OSRS_ee — منظومة التشغيل الموثوق والعزل وإدارة الحالة
 
-> **الحالة الحالية للمستودع:** التوثيق المعياري الموحد والنواة البرمجية المعزولة (`PR-00` حتى `PR-05a`) **مكتملة ومحققة بـ 26 اختباراً آلياً ناجحاً (`26 passed`)** وخالية تماماً من الأسرار.  
-> **نقطة الدخول الإلزامية للاستئناف («تابع»):** اقرأ [`PROGRESS.md`](./PROGRESS.md) ثم [`docs/RESUME_PROTOCOL.md`](./docs/RESUME_PROTOCOL.md).
+> **الحالة الحالية للمستودع:** جميع المراحل البرمجية والتوثيقية (`PR-00` حتى `PR-10` + واجهة التشغيل الموحدة `CLI`) **مكتملة ومحققة بـ 38 اختباراً آلياً ناجحاً (`38 passed`)** وخالية 100% من أي أسرار مكشوفة (`[SECRET_SCAN_OK]`).  
+> **دليل الاستخدام الشامل خطوة بخطوة:** اقرأ **[`كيفيه_الاستخدام_من_الالف_للياء.md`](./كيفيه_الاستخدام_من_الالف_للياء.md)**.  
+> **نقطة الدخول للاستئناف الهندسي («تابع»):** اقرأ [`PROGRESS.md`](./PROGRESS.md) ثم [`docs/RESUME_PROTOCOL.md`](./docs/RESUME_PROTOCOL.md).
 
 ---
 
 ## 1. نبذة عن المشروع وفلسفته الهندسية
 
-مشروع **`OSRS_ee`** هو النواة الهندسية الموحدة لإدارة جلسات عميل `Microbot / RuneLite` بعزل صارم للبيانات والشبكة، وحفظ معاملاتي للحالة (`SQLite WAL` مع تصدير لقطة `state_snapshot.json` للقراءة البشرية)، وإيجارات جلسات مفحوصة الجيل (`Lease + session_epoch`)، وسجل أوامر مسبق التدوين (`Write-Ahead Command Journal`)، واسترداد آمن بعد الانهيار أو انقطاع الكهرباء.
+مشروع **`OSRS_ee`** هو النواة الهندسية الموحدة لإدارة وتشغيل جلسات عميل `Microbot / RuneLite` على أنظمة **`Windows`** و**`Linux`** بعزل صارم للبيانات والشبكة (`Per-Slot Loopback SOCKS5h Sidecar` + `Fail-Closed Kill-Switch`)، وخزنة أسرار محلية بصلاحية المالك فقط (`LocalSecretVault 0600` تدعم حسابات `Legacy` و`Jagex Account`)، وحفظ معاملاتي للحالة (`SQLite WAL` مع تصدير لقطة `state_snapshot.json` منقحة 100%)، وإيجارات جلسات مفحوصة الجيل (`Lease + session_epoch`)، وسجل أوامر مسبق التدوين (`Write-Ahead Command Journal`)، واسترداد آمن بعد الانهيار أو انقطاع الكهرباء.
 
 ### مبدأ الصدق المعرفي الصارم (`ADR-001`)
-* يميز هذا المستودع بصرامة بين ما هو **منفذ ومختبر فعلياً في المحاكاة المعزولة (`HERMETIC_VERIFIED`)**، وما هو **مواصفة معيارية معتمدة (`SPECIFIED`)**، وما لم **يُختبر بعد على عميل لعبة حي (`LIVE_VERIFIED` مؤجل إلى `PR-05b / PR-06`)**.
-* الهندسة المطبقة تقلل أعطال التشغيل والتلوث الشبكي/السلوكي وفقدان البيانات، **لكنها لا تدّعي ضماناً مطلقاً (100%) ضد الحظر من مطور اللعبة**.
+* يميز هذا المستودع بصرامة بين ما هو **منفذ ومختبر فعلياً بالاختبارات الآلية وحقن الأعطال (`HERMETIC_VERIFIED` — 38 اختباراً ناجحاً)**، وما يتطلب **التشغيل الحي على جهاز المالك (`PENDING_OWNER_HOST_RUN`)** لارتباطه بتثبيت `Microbot JAR` وبروكسيات السكن الفعلية وتدوير توكن التليجرام لدى `@BotFather`.
+* الهندسة المطبقة تقلل أعطال التشغيل والتلوث الشبكي/السلوكي وفقدان البيانات وتمنع بيع أدوات الوصفات النشطة، **لكنها لا تدّعي ضماناً مطلقاً (100%) ضد الحظر من مطور اللعبة**.
 
 ---
 
@@ -19,45 +20,48 @@
 
 ```text
 Engine-Docs/
-├── README.md                              # البوابة الرئيسية للمشروع وطريقة الفحص والتشغيل
-├── PROGRESS.md                            # بوصلة التقدم الإلزامية لاستئناف العمل بكلمة "تابع"
-├── TASKS.md                               # سجل المهام الذرية الموحد (PR-00 .. PR-10)
-├── pyproject.toml                         # تعريف الحزمة البرمجية وإعدادات pytest
+├── كيفيه_الاستخدام_من_الالف_للياء.md      # الدليل التشغيلي الكامل من الصفر حتى الإطلاق والطوارئ
+├── README.md                              # البوابة الرئيسية للمشروع وخريطة الوحدات
+├── PROGRESS.md                            # بوصلة التقدم وسجل الإغلاق الهندسي
+├── TASKS.md                               # سجل المهام الذرية الموحد (PR-00 .. PR-11)
+├── .env.example                           # قالب متغيرات البيئة الآمن (انسخه إلى .env محلياً)
+├── pyproject.toml                         # تعريف الحزمة البرمجية ونقطة دخول `osrs-ee`
 ├── .gitignore                             # قواعد منع تسرب الأسرار وقواعد البيانات والساندبوكس
-├── docs/                                  # الوثائق الهندسية المعيارية الموحدة (الحاكمة للتنفيذ)
-│   ├── RESUME_PROTOCOL.md                 # بروتوكول الاستئناف والتعافي من انقطاع الجلسة
-│   ├── PROJECT_CONTEXT_AND_REQUIREMENTS.md# حدود المصادر، نطاق MVP، والمتطلبات المعيارية REQ-*
-│   ├── AUDIT_REGISTER.md                  # دمج تقارير الوكلاء الثلاثة وحسم التعارضات (AUD-01..35)
-│   ├── DECISIONS.md                       # القرارات المعمارية المعتمدة والمعلقة (ADR-001..008)
-│   ├── ARCHITECTURE_AND_DESIGN.md         # مصفوفة الملكية وتصميم العزل والشبكة
-│   ├── DATA_CONTRACTS_AND_STATE.md        # مخططات البيانات المعيارية وآلات الحالات (13 حالة)
-│   ├── SECURITY_AND_RECOVERY.md           # الأمان، RBAC التليجرام، ميزانية 500MB، والتعافي
-│   ├── EXECUTION_AND_MIGRATION_PLAN.md    # خطة التنفيذ المرحلية وترحيل أصول OSRS_Bot
-│   └── ACCEPTANCE_TESTS.md                # مصفوفة اختبارات القبول وبوابات الإغلاق (T01..T32)
+├── docs/                                  # 9 وثائق هندسية معيارية حاكمة (AUD-01..35 + ADR-001..008)
 ├── وثائق_المحركات/                         # وثائق المحركات التفصيلية المحدثة والمتوافقة (v2.1)
 ├── schemas/                               # 6 مخططات JSON معيارية قابلة للتحقق الآلي (PR-02)
-├── osrs_ee/                               # الحزمة البرمجية المنفذة تدريجياً (Zero External Deps)
-│   ├── security/                          # Redactor + secret_scan + فحص صلاحيات 0600 (PR-00)
-│   ├── contracts/                         # مدقق المخططات + RuntimeConfigSnapshot + PersonaProfile (PR-02)
-│   ├── state/                             # StateStore (SQLite WAL) + FSM + Leases + Journal + RBAC (PR-03)
-│   ├── runtime/                           # SingleSlotSupervisor + GameAdapterGate + TaskWorker + FakeGameAdapter (PR-04)
-│   └── sandbox/                           # SandboxProfileSeeder + Golden Cache + MicrobotHttpAdapter (PR-05a)
-├── tests/                                 # 26 اختبار قبول وحقن أعطال آلي (PR-00 .. PR-05a)
-├── تقرير/                                 # تقارير التدقيق الخام الأصلية للوكلاء الثلاثة (مرجع تاريخي)
-├── للمعمارية.md                            # سجل التخطيط التاريخي (منقح من الأسرار)
-└── ي.txt                                  # وثيقة تفويض التنفيذ والدمج الهندسي
+├── osrs_ee/                               # الحزمة البرمجية الكاملة (100% Python 3.11+ Stdlib)
+│   ├── cli.py / __main__.py               # واجهة الأوامر الموحدة لويندوز ولينكس (`python -m osrs_ee`)
+│   ├── security/                          # Redactor + secret_scan + LocalSecretVault + ingest_pipe_lines
+│   ├── contracts/                         # مدقق المخططات + RuntimeConfigSnapshot + PersonaProfile
+│   ├── state/                             # StateStore (SQLite WAL) + 13-State FSM + Leases + RBAC
+│   ├── runtime/                           # SingleSlotSupervisor + GameAdapterGate + TaskWorker + FakeGameAdapter
+│   ├── sandbox/                           # SandboxProfileSeeder + MicrobotHttpAdapter + ManagedProcessTree
+│   ├── network/                           # LocalSocks5Sidecar (RFC1928/1929 + ATYP=0x03 DNS + Kill-Switch)
+│   ├── tasks/                             # CuratedRecipeRegistry + SingleSlotPilotRunner
+│   ├── ai/                                # DeterministicStrongholdSolver + AIAdvisoryClient (Breaker + Guard)
+│   ├── telemetry/                         # LogQuotaGuardian (<500MB) + BoundedOutbox + TelegramGateway
+│   ├── orchestrator/                      # RssCapacityCalculator + StaggeredLaunchPlanner + ReleaseStagingGate
+│   └── economy/                           # DefaultDenySellPolicy + ActiveRecipeInputLock + GEOrderLedger (2% Tax)
+└── tests/                                 # 38 اختبار قبول وحقن أعطال آلي تغطي المصفوفة T01..T32
 ```
 
 ---
 
-## 3. أوامر التحقق والتشغيل (`Verification Commands`)
+## 3. البدء السريع وأوامر التحقق (`Quick Verification`)
 
-تعمل النواة المعزولة على Python 3.11+ بدون أي تبعيات خارجية سوى `pytest` لتشغيل الاختبارات:
+يعمل النظام مباشرة على **Python 3.11+** بدون أي مكتبات خارجية للتشغيل (`Zero Runtime Dependencies` — وفقط `pytest` للاختبارات):
 
 ```bash
-# 1. التحقق من خلو المستودع بالكامل من أي أسرار مكشوفة (T01)
-PYTHONPATH=. python3 -m osrs_ee.security.secret_scan .
+# 1. الفحص الصحي للنظام وحساب سعة الرام وفحص خلو المستودع من الأسرار
+PYTHONPATH=. python3 -m osrs_ee doctor
 
-# 2. تشغيل حزمة الاختبارات الآلية وحقن الأعطال الكاملة (26 اختباراً)
+# 2. تشغيل حزمة الاختبارات الآلية وحقن الأعطال الكاملة (38 اختباراً)
 PYTHONPATH=. pytest -v
+
+# 3. تهيئة مجلد البيانات المحلي المعزول وتجربة دورة طيار محاكاة كاملة
+PYTHONPATH=. python3 -m osrs_ee init
+PYTHONPATH=. python3 -m osrs_ee simulate-pilot --recipe-id stage2_stronghold_10k
 ```
+
+للتفاصيل الكاملة لإدخال الحسابات (`Legacy` و`Jagex`) وتشغيل عميل `Microbot` الحي على Windows أو Linux وإعداد التليجرام، راجع **[`كيفيه_الاستخدام_من_الالف_للياء.md`](./كيفيه_الاستخدام_من_الالف_للياء.md)**.

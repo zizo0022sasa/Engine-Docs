@@ -196,6 +196,10 @@ class StateStore:
         if self._conn.in_transaction:
             self._conn.execute("ROLLBACK;")
 
+    def export_snapshot(self) -> None:
+        with self._lock:
+            self._export_snapshot_unlocked()
+
     def _export_snapshot_unlocked(self) -> None:
         assert self.snapshot_path is not None
         rows = self._conn.execute("SELECT * FROM accounts ORDER BY account_id").fetchall()

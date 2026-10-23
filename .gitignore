@@ -32,6 +32,7 @@ state_snapshot.json
 *.lock
 
 # 3. Isolated Client Sandboxes, RuneLite Homes, Logs, Screenshots & Outbox
+.osrs_ee_data/
 sandboxes/
 OSRS_Sandboxes/
 .runelite/

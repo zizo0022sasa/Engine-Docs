@@ -23,6 +23,7 @@ _SCAN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 _SKIP_DIRS = frozenset(
     {
         ".git",
+        ".osrs_ee_data",
         "__pycache__",
         ".pytest_cache",
         ".mypy_cache",
