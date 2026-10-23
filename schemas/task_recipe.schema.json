@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TaskRecipe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recipe_id",
+    "display_name",
+    "plugin_id",
+    "verification_stage",
+    "stage_tier",
+    "min_skills",
+    "required_varps",
+    "tool_candidates",
+    "sellable_yields",
+    "clear_equipment"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "recipe_id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+    "display_name": {"type": "string", "minLength": 3},
+    "plugin_id": {"type": "string", "minLength": 3},
+    "verification_stage": {
+      "type": "string",
+      "enum": ["CONCEPT_ONLY", "AVAILABLE_SOURCE", "HERMETIC_TESTED", "LIVE_VERIFIED"]
+    },
+    "stage_tier": {
+      "type": "string",
+      "enum": [
+        "STAGE_0_TUTORIAL",
+        "STAGE_1A_QP_AND_TOTAL",
+        "STAGE_1B_SEASONING",
+        "STAGE_2_CAPITAL",
+        "STAGE_3_F2P_SKILLING",
+        "STAGE_4_P2P_EXPANSION"
+      ]
+    },
+    "min_skills": {"type": "object"},
+    "required_varps": {"type": "object"},
+    "tool_candidates": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "sellable_yields": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "clear_equipment": {"type": "boolean"}
+  }
+}

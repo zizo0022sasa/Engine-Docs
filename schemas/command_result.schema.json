@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CommandResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command_id",
+    "event_id",
+    "session_id",
+    "session_epoch",
+    "transport_status",
+    "effect_status",
+    "completed_at",
+    "post_observation_id",
+    "error_code",
+    "diagnostic_note"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "command_id": {"type": "string", "minLength": 4},
+    "event_id": {"type": "string", "minLength": 4},
+    "session_id": {"type": "string", "minLength": 4},
+    "session_epoch": {"type": "integer", "minimum": 1},
+    "transport_status": {
+      "type": "string",
+      "enum": ["NOT_SENT", "HTTP_200", "HTTP_4XX", "HTTP_5XX", "TRANSPORT_TIMEOUT", "CONNECTION_ERROR"]
+    },
+    "effect_status": {
+      "type": "string",
+      "enum": ["VERIFIED", "UNKNOWN", "FAILED_VERIFIED", "REJECTED"]
+    },
+    "completed_at": {"type": "string", "minLength": 10},
+    "post_observation_id": {"type": ["string", "null"]},
+    "error_code": {"type": ["string", "null"]},
+    "diagnostic_note": {"type": "string"}
+  }
+}

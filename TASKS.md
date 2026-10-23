@@ -28,8 +28,8 @@
 
 | ID | المهمة | الأولوية | المصادر | الاختبارات | الحالة | الدليل / الكوميت |
 | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-| **`TASK-02-01`** | كتابة المخططات المعيارية في `schemas/*.schema.json` ونماذج التحقق الصارم في `osrs_ee/contracts/` (`SessionLaunch`, `Observation`, `CommandIntent`, `CommandResult`, `AIProposal`, `TaskRecipe`) مع قاعدة `UNKNOWN -> None`. | `P0` | `AUD-05`, `AUD-06`, `AUD-10`, `AUD-15`, `AUD-17` | `T05`, `T10`, `T14`, `T20` | `PLANNED` | الخطوة التالية مباشرة |
-| **`TASK-02-02`** | بناء `RuntimeConfigSnapshot` لفصل سقوف السلامة عن النطاقات التكيفية المختومة بالهاش، ومولد التوقيت `Bounded Log-Normal` وأبعاد النوافذ المشتقة من `persona_seed` مع انتظار رتيب قابل للإلغاء. | `P1` | `AUD-29`, `AUD-32` | `T26`, `T32` | `PLANNED` | يلي `TASK-02-01` |
+| **`TASK-02-01`** | كتابة المخططات المعيارية في `schemas/*.schema.json` ونماذج التحقق الصارم في `osrs_ee/contracts/` (`SessionLaunch`, `Observation`, `CommandIntent`, `CommandResult`, `AIProposal`, `TaskRecipe`) مع قاعدة `UNKNOWN -> None`. | `P0` | `AUD-05`, `AUD-06`, `AUD-10`, `AUD-15`, `AUD-17` | `T05`, `T10`, `T14`, `T20` | `VERIFIED` | `PR-02` (`test_pr02_contracts.py`) |
+| **`TASK-02-02`** | بناء `RuntimeConfigSnapshot` لفصل سقوف السلامة عن النطاقات التكيفية المختومة بالهاش، ومولد التوقيت `Bounded Log-Normal` وأبعاد النوافذ المشتقة من `persona_seed` مع انتظار رتيب قابل للإلغاء. | `P1` | `AUD-29`, `AUD-32` | `T26`, `T32` | `VERIFIED` | `PR-02` (`test_pr02_contracts.py`) |
 
 ---
 

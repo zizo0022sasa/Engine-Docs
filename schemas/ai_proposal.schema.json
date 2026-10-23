@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AIProposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proposal_id",
+    "incident_id",
+    "account_id",
+    "session_id",
+    "session_epoch",
+    "based_on_observation_id",
+    "diagnosis_category",
+    "recommended_disposition",
+    "rationale",
+    "requires_human_approval"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "proposal_id": {"type": "string", "minLength": 4},
+    "incident_id": {"type": "string", "minLength": 4},
+    "account_id": {"type": "string", "pattern": "^acc_[a-z0-9_]+$"},
+    "session_id": {"type": "string", "minLength": 4},
+    "session_epoch": {"type": "integer", "minimum": 1},
+    "based_on_observation_id": {"type": "string", "minLength": 3},
+    "diagnosis_category": {
+      "type": "string",
+      "enum": [
+        "CAMERA_OCCLUSION",
+        "CLOSED_DOOR_OR_GATE",
+        "KNOWN_SECURITY_DIALOGUE",
+        "UNEXPECTED_WIDGET_OVERLAY",
+        "RESOURCE_DEPLETED",
+        "UNKNOWN_ANOMALY"
+      ]
+    },
+    "recommended_disposition": {
+      "type": "string",
+      "enum": [
+        "NO_ACTION",
+        "REQUEST_REOBSERVATION",
+        "REQUEST_SAFE_DRAIN",
+        "REQUEST_HUMAN_REVIEW"
+      ]
+    },
+    "rationale": {"type": "string", "minLength": 3},
+    "requires_human_approval": {"type": "boolean"}
+  }
+}

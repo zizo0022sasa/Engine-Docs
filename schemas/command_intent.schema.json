@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CommandIntent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command_id",
+    "session_id",
+    "account_id",
+    "client_instance_id",
+    "lease_id",
+    "session_epoch",
+    "base_state_version",
+    "command_type",
+    "idempotency_class",
+    "payload",
+    "precondition",
+    "expected_postcondition",
+    "timeout_ms"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "command_id": {"type": "string", "minLength": 4},
+    "session_id": {"type": "string", "minLength": 4},
+    "account_id": {"type": "string", "pattern": "^acc_[a-z0-9_]+$"},
+    "client_instance_id": {"type": "string", "minLength": 4},
+    "lease_id": {"type": "string", "minLength": 4},
+    "session_epoch": {"type": "integer", "minimum": 1},
+    "base_state_version": {"type": "integer", "minimum": 0},
+    "command_type": {
+      "type": "string",
+      "enum": [
+        "BANK_OPEN",
+        "BANK_CLOSE",
+        "BANK_DEPOSIT_INVENTORY",
+        "BANK_DEPOSIT_EQUIPMENT",
+        "BANK_WITHDRAW_ITEM",
+        "INTERACT_OBJECT",
+        "DIALOGUE_SELECT",
+        "WALK_TO_WORLD_POINT",
+        "PLUGIN_START",
+        "PLUGIN_STOP",
+        "SAFE_LOGOUT"
+      ]
+    },
+    "idempotency_class": {"type": "string", "enum": ["IDEMPOTENT", "NON_IDEMPOTENT"]},
+    "payload": {"type": "object"},
+    "precondition": {"type": "string", "minLength": 1},
+    "expected_postcondition": {"type": "string", "minLength": 1},
+    "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 60000}
+  }
+}
