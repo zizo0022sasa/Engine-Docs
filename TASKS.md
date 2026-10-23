@@ -37,8 +37,8 @@
 
 | ID | المهمة | الأولوية | المصادر | الاختبارات | الحالة | الدليل / الكوميت |
 | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-| **`TASK-03-01`** | بناء مخزن `StateStore` فوق `SQLite (WAL)` بمعاملات ذرية وتصدير تلقائي للقطة منقحة `state_snapshot.json`، وتنفيذ آلة حالات الحساب الموحدة (13 حالة + `reason_code`) وبوابة فك تداول F2P (`10 QP + 100 TTL + 1200m`) والنوم الليلي الإقليمي. | `P0` | `AUD-11`, `AUD-13`, `AUD-14`, `AUD-18`, `AUD-31` | `T08`, `T09`, `T11`, `T31` | `PLANNED` | بعد `PR-02` |
-| **`TASK-03-02`** | تنفيذ الإيجارات الحصرية متزايدة الجيل (`Lease + session_epoch`)، سجل الأوامر `Write-Ahead CommandJournal`، منع تكرار `event_id`، استرداد الانهيار إلى `RECOVERY_REQUIRED`، وسجل الموافقات وحيدة الاستخدام `ApprovalRecord`. | `P0` | `AUD-04`, `AUD-05`, `AUD-12`, `AUD-14` | `T03`, `T04`, `T07`, `T08`, `T09` | `PLANNED` | بعد `TASK-03-01` |
+| **`TASK-03-01`** | بناء مخزن `StateStore` فوق `SQLite (WAL)` بمعاملات ذرية وتصدير تلقائي للقطة منقحة `state_snapshot.json`، وتنفيذ آلة حالات الحساب الموحدة (13 حالة + `reason_code`) وبوابة فك تداول F2P (`10 QP + 100 TTL + 1200m`) والنوم الليلي الإقليمي. | `P0` | `AUD-11`, `AUD-13`, `AUD-14`, `AUD-18`, `AUD-31` | `T08`, `T09`, `T11`, `T31` | `VERIFIED` | `PR-03` (`test_pr03_state_core.py`) |
+| **`TASK-03-02`** | تنفيذ الإيجارات الحصرية متزايدة الجيل (`Lease + session_epoch`)، سجل الأوامر `Write-Ahead CommandJournal`، منع تكرار `event_id`، استرداد الانهيار إلى `RECOVERY_REQUIRED`، وسجل الموافقات وحيدة الاستخدام `ApprovalRecord`. | `P0` | `AUD-04`, `AUD-05`, `AUD-12`, `AUD-14` | `T03`, `T04`, `T07`, `T08`, `T09` | `VERIFIED` | `PR-03` (`test_pr03_state_core.py`) |
 
 ---
 
