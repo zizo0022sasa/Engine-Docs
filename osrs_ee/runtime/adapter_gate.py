@@ -28,10 +28,23 @@ ALLOWED_MVP_COMMANDS: frozenset[str] = frozenset(
         "BANK_WITHDRAW_ITEM",
         "INTERACT_OBJECT",
         "DIALOGUE_SELECT",
+        "DIALOGUE_CONTINUE",
         "WALK_TO_WORLD_POINT",
+        "CONSUME_FOOD",
+        "SET_RUN_MODE",
+        "TRIGGER_LOGIN",
         "PLUGIN_START",
         "PLUGIN_STOP",
         "SAFE_LOGOUT",
+    }
+)
+
+PIPELINED_STREAM_COMMANDS: frozenset[str] = frozenset(
+    {
+        "WALK_TO_WORLD_POINT",
+        "CONSUME_FOOD",
+        "SET_RUN_MODE",
+        "DIALOGUE_CONTINUE",
     }
 )
 
@@ -166,6 +179,67 @@ class GameAdapterGate:
             "post_observation_id": post_obs["observation_id"],
             "error_code": None if effect_verified else str(raw_resp.get("reason", "POSTCONDITION_FAILED")),
             "diagnostic_note": "Effect verified by post-observation" if effect_verified else "Postcondition did not hold",
+        }
+        self.store.finalize_command_result(result)
+        return result
+
+    def dispatch_pipelined_command(self, *, intent: dict[str, Any]) -> dict[str, Any]:
+        """Non-blocking stream dispatch for movement/eat/run (PR-12 / AUD-36 / ADR-009).
+
+        Eliminates cascading synchronous post-observation polls in hot combat/movement paths;
+        state confirmation occurs reactively on the next game tick via `ReactiveSafetyWatchdog`.
+        """
+        cmd_type = intent.get("command_type", "")
+        if cmd_type not in PIPELINED_STREAM_COMMANDS:
+            raise PolicyDeniedError(
+                f"Command '{cmd_type}' is not eligible for non-blocking pipelined stream; use dispatch_verified_command"
+            )
+        validate_command_intent(intent)
+        self.store.prepare_command_intent(intent)
+        self.store.mark_command_dispatching(
+            command_id=intent["command_id"],
+            account_id=intent["account_id"],
+            session_id=intent["session_id"],
+            lease_id=intent["lease_id"],
+            session_epoch=intent["session_epoch"],
+            client_instance_id=intent["client_instance_id"],
+        )
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        event_id = f"evt_{uuid.uuid4().hex[:12]}"
+        try:
+            raw_resp = self.adapter.execute_raw_command(cmd_type, intent["payload"])
+        except (TimeoutError, ConnectionError) as exc:
+            is_timeout = isinstance(exc, TimeoutError)
+            result = {
+                "schema_version": "1.0",
+                "command_id": intent["command_id"],
+                "event_id": event_id,
+                "session_id": intent["session_id"],
+                "session_epoch": intent["session_epoch"],
+                "transport_status": "TRANSPORT_TIMEOUT" if is_timeout else "CONNECTION_ERROR",
+                "effect_status": "FAILED_VERIFIED" if intent["idempotency_class"] == "IDEMPOTENT" else "UNKNOWN",
+                "completed_at": now_iso,
+                "post_observation_id": None,
+                "error_code": "TRANSPORT_TIMEOUT" if is_timeout else "CONNECTION_ERROR",
+                "diagnostic_note": str(exc),
+            }
+            self.store.finalize_command_result(result)
+            return result
+
+        accepted = bool(raw_resp.get("ok") or raw_resp.get("success"))
+        result = {
+            "schema_version": "1.0",
+            "command_id": intent["command_id"],
+            "event_id": event_id,
+            "session_id": intent["session_id"],
+            "session_epoch": intent["session_epoch"],
+            "transport_status": "HTTP_200",
+            "effect_status": "PIPELINED_NEXT_TICK" if accepted else "FAILED_VERIFIED",
+            "completed_at": now_iso,
+            "post_observation_id": None,
+            "error_code": None if accepted else str(raw_resp.get("reason", "REJECTED_BY_CLIENT")),
+            "diagnostic_note": "Accepted in non-blocking pipeline; verified reactively on next game tick",
         }
         self.store.finalize_command_result(result)
         return result

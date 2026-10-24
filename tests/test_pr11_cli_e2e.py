@@ -109,10 +109,32 @@ def test_e2e_cli_workflow_init_ingest_simulate_dryrun_and_status_zero_secret_lea
     for secret in (canary_pw, canary_jx, canary_px_pw):
         assert secret not in dry_out
 
-    # 6. plan-stagger & status & snapshot verification
+    # 6. plan-stagger, plan-route (safe corridor without 3149,3480), status & snapshot verification
     assert main(["--data-dir", str(data_dir), "plan-stagger", "--accounts", "acc_01,acc_02,acc_03"]) == 0
     stag_json = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
     assert stag_json["relative_launch_offsets_sec"]["acc_02"] >= 90.0
+
+    assert (
+        main(
+            [
+                "--data-dir",
+                str(data_dir),
+                "plan-route",
+                "--origin",
+                "GRAND_EXCHANGE",
+                "--destination",
+                "BARBARIAN_VILLAGE",
+                "--agility",
+                "1",
+                "--combat-level",
+                "3",
+            ]
+        )
+        == 0
+    )
+    route_json = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert route_json["walker_flags"]["allowShortcuts"] is False
+    assert all((wp["x"], wp["y"]) != (3149, 3480) for wp in route_json["waypoints"])
 
     assert main(["--data-dir", str(data_dir), "status"]) == 0
     stat_out = capsys.readouterr().out  # type: ignore[attr-defined]

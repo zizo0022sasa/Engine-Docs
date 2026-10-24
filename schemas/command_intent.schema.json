@@ -38,7 +38,11 @@
         "BANK_WITHDRAW_ITEM",
         "INTERACT_OBJECT",
         "DIALOGUE_SELECT",
+        "DIALOGUE_CONTINUE",
         "WALK_TO_WORLD_POINT",
+        "CONSUME_FOOD",
+        "SET_RUN_MODE",
+        "TRIGGER_LOGIN",
         "PLUGIN_START",
         "PLUGIN_STOP",
         "SAFE_LOGOUT"

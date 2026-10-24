@@ -342,9 +342,10 @@ class StateStore:
         account_id: str,
         slot_id: int,
         task_id: str,
-        now_utc: datetime,
+        now_utc: datetime | None = None,
         session_kind: str = "WORK",  # WORK | DISCOVERY | RECONCILE
     ) -> dict[str, Any]:
+        now_utc = now_utc or datetime.now(timezone.utc)
         with self._lock:
             try:
                 self._tx_begin()

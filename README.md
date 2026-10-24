@@ -1,6 +1,6 @@
 # 🛡️ OSRS_ee — منظومة التشغيل الموثوق والعزل وإدارة الحالة
 
-> **الحالة الحالية للمستودع:** جميع المراحل البرمجية والتوثيقية (`PR-00` حتى `PR-10` + واجهة التشغيل الموحدة `CLI`) **مكتملة ومحققة بـ 38 اختباراً آلياً ناجحاً (`38 passed`)** وخالية 100% من أي أسرار مكشوفة (`[SECRET_SCAN_OK]`).  
+> **الحالة الحالية للمستودع:** جميع المراحل البرمجية والتوثيقية ومعالجة العيوب الميدانية الأربعة (`PR-00` حتى `PR-12`) **مكتملة ومحققة بـ 42 اختباراً آلياً ناجحاً (`42 passed`)** وخالية 100% من أي أسرار مكشوفة (`[SECRET_SCAN_OK]`).  
 > **دليل الاستخدام الشامل خطوة بخطوة:** اقرأ **[`كيفيه_الاستخدام_من_الالف_للياء.md`](./كيفيه_الاستخدام_من_الالف_للياء.md)**.  
 > **نقطة الدخول للاستئناف الهندسي («تابع»):** اقرأ [`PROGRESS.md`](./PROGRESS.md) ثم [`docs/RESUME_PROTOCOL.md`](./docs/RESUME_PROTOCOL.md).
 
@@ -32,6 +32,9 @@ Engine-Docs/
 ├── schemas/                               # 6 مخططات JSON معيارية قابلة للتحقق الآلي (PR-02)
 ├── osrs_ee/                               # الحزمة البرمجية الكاملة (100% Python 3.11+ Stdlib)
 │   ├── cli.py / __main__.py               # واجهة الأوامر الموحدة لويندوز ولينكس (`python -m osrs_ee`)
+│   ├── core/                              # ExecutionEngineKernel + ReactiveSafetyWatchdog + SessionLifecycleManager (PR-12)
+│   ├── navigation/                        # ConstrainedWaypointGraph + AccountCapabilitiesContext + Safe Corridors (PR-12)
+│   ├── bots/                              # واجهة المهام المعزولة TaskModule ووحدات البوتات القابلة للتبديل (PR-12)
 │   ├── security/                          # Redactor + secret_scan + LocalSecretVault + ingest_pipe_lines
 │   ├── contracts/                         # مدقق المخططات + RuntimeConfigSnapshot + PersonaProfile
 │   ├── state/                             # StateStore (SQLite WAL) + 13-State FSM + Leases + RBAC

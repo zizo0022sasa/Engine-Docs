@@ -84,14 +84,14 @@ def test_t25_engine_docs_free_of_superseded_contradictions_and_false_guarantees(
 
 
 def test_t28_adr_and_audit_register_cross_references_are_complete() -> None:
-    """T28: Verify ADR-001..ADR-008 and AUD-01..AUD-35 are properly registered and secret-free."""
+    """T28: Verify ADR-001..ADR-012 and AUD-01..AUD-39 are properly registered and secret-free."""
     decisions = (REPO_ROOT / "docs/DECISIONS.md").read_text(encoding="utf-8")
-    for i in range(1, 9):
-        adr_id = f"ADR-00{i}"
+    for i in range(1, 13):
+        adr_id = f"ADR-{i:03d}"
         assert adr_id in decisions, f"Missing {adr_id} in docs/DECISIONS.md"
 
     audit_reg = (REPO_ROOT / "docs/AUDIT_REGISTER.md").read_text(encoding="utf-8")
-    for i in range(1, 36):
+    for i in range(1, 40):
         aud_id = f"AUD-{i:02d}"
         assert aud_id in audit_reg, f"Missing {aud_id} in docs/AUDIT_REGISTER.md"
 

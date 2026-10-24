@@ -111,8 +111,8 @@ def validate_command_result(payload: dict[str, Any]) -> dict[str, Any]:
     _run_schema(payload, "command_result.schema.json")
     transport = payload["transport_status"]
     effect = payload["effect_status"]
-    if effect == "VERIFIED" and transport != "HTTP_200":
-        raise ContractValidationError("effect_status cannot be VERIFIED without HTTP_200 transport")
+    if effect in ("VERIFIED", "PIPELINED_NEXT_TICK") and transport != "HTTP_200":
+        raise ContractValidationError(f"effect_status cannot be {effect} without HTTP_200 transport")
     if effect == "VERIFIED" and not payload.get("post_observation_id"):
         raise ContractValidationError("VERIFIED effect_status requires a post_observation_id proof")
     if transport == "NOT_SENT" and effect not in ("REJECTED", "FAILED_VERIFIED"):

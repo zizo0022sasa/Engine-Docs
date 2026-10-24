@@ -133,6 +133,18 @@
           }
         }
       }
+    },
+    "vitals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hp_current", "hp_max", "run_energy", "run_enabled", "under_attack"],
+      "properties": {
+        "hp_current": {"type": ["integer", "null"], "minimum": 0},
+        "hp_max": {"type": ["integer", "null"], "minimum": 1},
+        "run_energy": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000},
+        "run_enabled": {"type": "boolean"},
+        "under_attack": {"type": "boolean"}
+      }
     }
   }
 }

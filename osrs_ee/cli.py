@@ -25,9 +25,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from osrs_ee.bots import SkillingGathererTaskModule, StrongholdTaskModule, TaskModule
+from osrs_ee.core import ExecutionEngineKernel
 from osrs_ee.economy import GEOrderLedger
+from osrs_ee.navigation import AccountCapabilitiesContext, ConstrainedWaypointGraph
 from osrs_ee.network import LocalSocks5Sidecar
 from osrs_ee.orchestrator import RssCapacityCalculator, StaggeredLaunchPlanner
+from osrs_ee.runtime.adapter_gate import GameAdapterGate
 from osrs_ee.runtime.fake_adapter import FakeGameAdapter
 from osrs_ee.runtime.supervisor import SingleSlotSupervisor
 from osrs_ee.sandbox import (
@@ -206,6 +210,47 @@ def _cmd_status(args: argparse.Namespace) -> int:
         store.close()
 
 
+def _resolve_task_module(recipe_id: str) -> TaskModule:
+    if recipe_id == "stage2_stronghold_10k":
+        return StrongholdTaskModule()
+    return SkillingGathererTaskModule(recipe_id=recipe_id)
+
+
+def _cmd_plan_route(args: argparse.Namespace) -> int:
+    caps = AccountCapabilitiesContext(
+        account_id=args.account_id,
+        skills={"agility": args.agility},
+        combat_level=args.combat_level,
+        is_member=bool(args.member),
+        coins_gp=args.coins_gp,
+    )
+    graph = ConstrainedWaypointGraph()
+    plan = graph.plan_safe_route(
+        origin=args.origin,
+        destination=args.destination,
+        capabilities=caps,
+    )
+    print(
+        json.dumps(
+            {
+                "account_id": args.account_id,
+                "origin": plan.origin_node,
+                "destination": plan.destination_node,
+                "total_cost_tiles": plan.total_cost_tiles,
+                "walker_flags": plan.walker_flags,
+                "waypoints": [
+                    {"x": wp.x, "y": wp.y, "plane": wp.plane, "label": wp.label}
+                    for wp in plan.waypoints
+                ],
+                "pruned_shortcuts_and_hazards": dict(plan.pruned_edges),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def _cmd_plan_stagger(args: argparse.Namespace) -> int:
     accs = [a.strip() for a in args.accounts.split(",") if a.strip()]
     planner = StaggeredLaunchPlanner()
@@ -365,11 +410,30 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
             proc_tree.start()
             adapter = MicrobotHttpAdapter(
                 port=bootstrap.adapter_port,
-                token=adapter_token,
+                agent_token=adapter_token,
                 account_id=args.account_id,
                 session_id=lease["session_id"],
                 session_epoch=lease["session_epoch"],
+                jvm_flags=jvm_cmd,
+                coalesce_window_ms=180,
             )
+            gate = GameAdapterGate(store, adapter)  # type: ignore[arg-type]
+            _ = supervisor.attach_session(lease=lease, gate=gate)
+            caps = AccountCapabilitiesContext(
+                account_id=args.account_id,
+                combat_level=max(3, int(acc["total_level"]) // 10),
+                quest_points=int(acc["quest_points"]),
+                is_member=False,
+            )
+            kernel = ExecutionEngineKernel(
+                gate=gate,
+                account_id=args.account_id,
+                session_id=lease["session_id"],
+                lease_id=lease["lease_id"],
+                session_epoch=lease["session_epoch"],
+                capabilities=caps,
+            )
+            task_mod = _resolve_task_module(args.recipe_id)
             print(
                 vault.redactor.redact_text(
                     json.dumps(
@@ -377,6 +441,7 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
                             "launched": True,
                             "pid": proc_tree.pid,
                             "account_id": args.account_id,
+                            "task_module": task_mod.module_id,
                             "adapter_port": bootstrap.adapter_port,
                             "sidecar_port": sidecar.listen_port,
                         },
@@ -385,15 +450,19 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
                 )
             )
             try:
-                while proc_tree.is_running():
-                    store.renew_session_lease(
-                        session_id=lease["session_id"], session_epoch=lease["session_epoch"]
-                    )
-                    time.sleep(5.0)
+                while proc_tree.is_running() and not supervisor.cancel_event.is_set():
+                    t_tick = time.monotonic()
+                    tick_res = kernel.step_tick(task_mod, now_monotonic=t_tick)
+                    if tick_res.halted:
+                        break
+                    # Wait only the remainder of the 0.6s OSRS game tick via cancellable Event (not blocking sleep!)
+                    spent = time.monotonic() - t_tick
+                    rem = max(0.05, 0.6 - spent)
+                    supervisor.cancel_event.wait(timeout=rem)
             except KeyboardInterrupt:
                 supervisor.abort()
             finally:
-                _ = adapter
+                adapter.kill_process_tree()
                 proc_tree.terminate_tree()
                 store.export_snapshot()
             return 0
@@ -429,6 +498,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stag = sub.add_parser("plan-stagger", help="Generate >=90s staggered cold-start schedule")
     p_stag.add_argument("--accounts", required=True, help="Comma-separated account IDs (e.g. acc_01,acc_02)")
+
+    p_route = sub.add_parser("plan-route", help="Compute capability-constrained Level-3 safe corridor route")
+    p_route.add_argument("--account-id", default="acc_01")
+    p_route.add_argument("--origin", default="GRAND_EXCHANGE")
+    p_route.add_argument("--destination", default="BARBARIAN_VILLAGE")
+    p_route.add_argument("--agility", type=int, default=1)
+    p_route.add_argument("--combat-level", type=int, default=3)
+    p_route.add_argument("--coins-gp", type=int, default=0)
+    p_route.add_argument("--member", action="store_true")
 
     p_sim = sub.add_parser("simulate-pilot", help="Run a hermetic end-to-end pilot session locally")
     p_sim.add_argument("--account-id", default="acc_sim_01")
@@ -469,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_status(args)
     if cmd == "plan-stagger":
         return _cmd_plan_stagger(args)
+    if cmd == "plan-route":
+        return _cmd_plan_route(args)
     if cmd == "simulate-pilot":
         return _cmd_simulate_pilot(args)
     if cmd == "dry-run-slot":

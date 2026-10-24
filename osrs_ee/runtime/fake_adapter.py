@@ -55,7 +55,16 @@ class FakeGameAdapter:
         self.quest_points = quest_points
         self.total_level = total_level
         self.playtime_minutes = playtime_minutes
-        self.skills = dict(skills or {"woodcutting": 35, "attack": 1, "fishing": 25, "mining": 20})
+        self.skills = dict(
+            skills or {"hitpoints": 10, "agility": 1, "woodcutting": 35, "attack": 1, "fishing": 25, "mining": 20}
+        )
+        self.hp_current: int = int(self.skills.get("hitpoints", 10))
+        self.hp_max: int = int(self.skills.get("hitpoints", 10))
+        self.run_energy: int = 100
+        self.run_enabled: bool = False
+        self.under_attack: bool = False
+        self.transient_disconnect: bool = False
+        self._pending_heal_on_tick: tuple[int, int] | None = None  # (target_tick, heal_amount)
 
         self.bank_open = False
         self.bank_pin_prompt_open = False
@@ -72,6 +81,22 @@ class FakeGameAdapter:
     def advance_tick(self, steps: int = 1) -> None:
         if self.alive and not self.freeze_ticks:
             self.game_tick += steps
+            if self._pending_heal_on_tick is not None:
+                due_tick, heal_amt = self._pending_heal_on_tick
+                if self.game_tick >= due_tick and not self.player_dead:
+                    self.hp_current = min(self.hp_max, self.hp_current + heal_amt)
+                    self._pending_heal_on_tick = None
+
+    def probe_session_state(self) -> dict[str, Any]:
+        """Lightweight single-probe connectivity & login check for `SessionLifecycleManager`."""
+        if not self.alive or self.transient_disconnect:
+            raise ConnectionError("Client endpoint unreachable or transiently disconnected")
+        return {
+            "reachable": True,
+            "logged_in": bool(self.logged_in),
+            "login_state": "LOGGED_IN" if self.logged_in else "LOGIN_SCREEN",
+            "game_tick": self.game_tick if self.logged_in else None,
+        }
 
     def kill_process_tree(self) -> None:
         self.alive = False
@@ -82,8 +107,38 @@ class FakeGameAdapter:
         return self.varbits.get(varbit_id, 0)
 
     def read_observation(self, *, monotonic_ms: int = 1000) -> dict[str, Any]:
-        if not self.alive:
-            raise ConnectionError("Client JVM process is terminated")
+        if not self.alive or self.transient_disconnect:
+            raise ConnectionError("Client JVM process is terminated or disconnected")
+        if not self.logged_in:
+            self._obs_seq += 1
+            return validate_observation(
+                {
+                    "schema_version": "1.0",
+                    "observation_id": f"obs_{self._obs_seq:06d}",
+                    "observed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "monotonic_ms": monotonic_ms,
+                    "account_id": self.account_id,
+                    "session_id": self.session_id,
+                    "client_instance_id": self.client_instance_id,
+                    "session_epoch": self.session_epoch,
+                    "login_state": "LOGIN_SCREEN",
+                    "game_tick": None,
+                    "world": None,
+                    "position": {"x": None, "y": None, "plane": None, "quality": "UNKNOWN"},
+                    "tutorial_varp_281": {"value": None, "quality": "UNKNOWN"},
+                    "quest_points": {"value": None, "quality": "UNKNOWN"},
+                    "total_level": {"value": None, "quality": "UNKNOWN"},
+                    "playtime_minutes": {"value": None, "quality": "UNKNOWN"},
+                    "dialogue_open": False,
+                    "bank": {
+                        "is_open": False,
+                        "pin_prompt_open": False,
+                        "items_quality": "UNKNOWN",
+                        "items": None,
+                    },
+                    "inventory": {"free_slots": None, "quality": "UNKNOWN", "items": None},
+                }
+            )
         self.advance_tick(1)
         self._obs_seq += 1
 
@@ -129,6 +184,13 @@ class FakeGameAdapter:
                 "free_slots": max(0, 28 - used_slots),
                 "quality": "KNOWN",
                 "items": copy.deepcopy(self.inventory_items),
+            },
+            "vitals": {
+                "hp_current": 0 if self.player_dead else self.hp_current,
+                "hp_max": self.hp_max,
+                "run_energy": self.run_energy,
+                "run_enabled": self.run_enabled,
+                "under_attack": self.under_attack,
             },
         }
         return validate_observation(obs)
@@ -210,6 +272,40 @@ class FakeGameAdapter:
             self.plugin_running = False
             self.auto_login_suppressed = True
             self.logged_in = False
+            return {"ok": True}
+
+        if command_type == "TRIGGER_LOGIN":
+            if self.auto_login_suppressed:
+                return {"ok": False, "reason": "auto_login_suppressed"}
+            self.logged_in = True
+            return {"ok": True}
+
+        if command_type == "WALK_TO_WORLD_POINT":
+            self.position = {
+                "x": int(payload["x"]),
+                "y": int(payload["y"]),
+                "plane": int(payload.get("plane", 0)),
+            }
+            return {"ok": True}
+
+        if command_type == "SET_RUN_MODE":
+            self.run_enabled = bool(payload.get("enabled", True))
+            return {"ok": True}
+
+        if command_type == "CONSUME_FOOD":
+            food_id = int(payload["item_id"])
+            heal = int(payload.get("expected_heal", 7))
+            for it in self.inventory_items:
+                if int(it["item_id"]) == food_id and int(it["quantity"]) > 0:
+                    it["quantity"] -= 1
+                    if it["quantity"] <= 0:
+                        self.inventory_items.remove(it)
+                    # Real OSRS behavior: HP updates on the NEXT game tick, NOT instantaneously!
+                    self._pending_heal_on_tick = (self.game_tick + 1, heal)
+                    return {"ok": True}
+            return {"ok": False, "reason": "food_not_in_inventory"}
+
+        if command_type in ("INTERACT_OBJECT", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
             return {"ok": True}
 
         raise ValueError(f"Unsupported command_type on FakeGameAdapter: {command_type}")

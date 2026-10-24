@@ -28,7 +28,7 @@
     },
     "effect_status": {
       "type": "string",
-      "enum": ["VERIFIED", "UNKNOWN", "FAILED_VERIFIED", "REJECTED"]
+      "enum": ["VERIFIED", "PIPELINED_NEXT_TICK", "UNKNOWN", "FAILED_VERIFIED", "REJECTED"]
     },
     "completed_at": {"type": "string", "minLength": 10},
     "post_observation_id": {"type": ["string", "null"]},

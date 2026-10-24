@@ -101,3 +101,19 @@
 * لا يعتمد النظام على `@ScriptDescriptor` أو حقن ملفات `.java` الخام أو تحوير المتغيرات (`AST Mutator`).
 * كل مهمة مسجلة في النظام تحمل عقد `TaskRecipe` يحدد: `recipe_id`، `plugin_id`، `config_overrides`، `required_varps`، `required_levels`، `required_items`، `sellable_yields`، `postconditions`، و`verification_stage`.
 * تحديثات `Microbot` و`Microbot-Hub` لا تُسحب في وقت التشغيل؛ بل تُبنى وتُفحص في مسار `staging/` وتُعتمد صراحة قبل الترقية بين الجلسات.
+
+---
+
+## 6. معمارية النواة التفاعلية المعزولة (`PR-12 Field-Remediated Core Architecture`)
+
+استجابةً لتقرير الفحص الميداني الحي (`AUD-36..39`)، تطبق طبقة التشغيل الحي الفصل الصارم التالي بين النواة الصلبة والمهام القابلة للتركيب:
+
+1. **درع دورة حياة الجلسة (`SessionLifecycleManager` — `osrs_ee/core/lifecycle_manager.py`):**
+   * يدير الحالات الخمس الصريحة: `DISCONNECTED -> AT_LOGIN -> LOGGING_IN -> IN_GAME <-> IN_DANGER`.
+   * عند سقوط المقبس أو الخروج لشاشة الـ Login (`loggedIn: false`)، يعزل المهام تماماً ويختصر استعلامات العميل إلى نبضة `/status` أو `/state` واحدة خفيفة، ثم ينفذ الإنعاش الذاتي بتراجع أسي (`1s -> 2s -> 4s -> 8s...`) حتى استقرار `IN_GAME`.
+2. **حارس السلامة التفاعلي غير المعطل (`ReactiveSafetyWatchdog` — `osrs_ee/core/reactive_watchdog.py`):**
+   * خالٍ 100% من `time.sleep`؛ يقيم الدم وطاقة الجري وسلامة الإحداثيات في الذاكرة خلال `<0.1ms`، ويضخ أوامر `CONSUME_FOOD` و`SET_RUN_MODE` بالتوازي التسلسلي (`PIPELINED_NEXT_TICK`) مع أمر الحركة `WALK_TO_WORLD_POINT` في نفس النبضة دون إيقاف الشخصية تحت ضربات الوحوش، مع التحقق من شفاء الدم في النبضة التالية واحترام مهلة الأكل (`3 Game Ticks`).
+3. **محرك الملاحة المقيد بقدرات الحساب (`ConstrainedWaypointGraph` — `osrs_ee/navigation/`):**
+   * يربط حساب المسار بسياق قدرات الحساب (`AccountCapabilitiesContext`) فيقص الاختصارات المهارية غير المتاحة (مثل اختصار الحائط غرب البورصة `(3149, 3480)` المتطلب `Agility 21` وعضوية) ومناطق الوحوش العدوانية (`Dark Wizards (3226, 3369)`)، ويوجه حسابات المستوى 3 عبر ممرات آمنة (`Level 3 Safe Corridors`) مع البث المسبق لنقاط الطريق (`Lookahead Streaming`) وإعادة التوجيه الآلي عند التعثر لـ 3 نبضات.
+4. **واجهة المهام المفصولة (`TaskModule` — `osrs_ee/bots/`):**
+   * ترتبط جميع المهام بالنواة (`ExecutionEngineKernel`) عبر دالة نقية واحدة `evaluate_tick(TickContext) -> TaskDirective` دون أي تداخل مع الشبكة أو السلامة أو إدارة الجلسات.
