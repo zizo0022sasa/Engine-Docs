@@ -17,5 +17,6 @@ osrs-ee = "osrs_ee.cli:main"
 include = ["osrs_ee*"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

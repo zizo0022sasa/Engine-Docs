@@ -27,6 +27,7 @@ ALLOWED_MVP_COMMANDS: frozenset[str] = frozenset(
         "BANK_DEPOSIT_EQUIPMENT",
         "BANK_WITHDRAW_ITEM",
         "INTERACT_OBJECT",
+        "WIDGET_CLICK",
         "DIALOGUE_SELECT",
         "DIALOGUE_CONTINUE",
         "WALK_TO_WORLD_POINT",
@@ -45,8 +46,20 @@ PIPELINED_STREAM_COMMANDS: frozenset[str] = frozenset(
         "CONSUME_FOOD",
         "SET_RUN_MODE",
         "DIALOGUE_CONTINUE",
+        "WIDGET_CLICK",
     }
 )
+
+
+def _is_client_response_accepted(raw_resp: dict[str, Any]) -> bool:
+    """Normalize diverse AgentServerPlugin handler boolean keys (`ok`, `success`, `clicked`, `opened`, `closed`)."""
+    return bool(
+        raw_resp.get("ok")
+        or raw_resp.get("success")
+        or raw_resp.get("clicked")
+        or raw_resp.get("opened")
+        or raw_resp.get("closed")
+    )
 
 
 class GameAdapterGate:
@@ -165,7 +178,7 @@ class GameAdapterGate:
 
         # Step 3: Read post-observation to verify actual game effect (never trust HTTP 200 blindly!)
         post_obs = self.adapter.read_observation()
-        effect_verified = bool(raw_resp.get("ok")) and postcondition_checker(post_obs)
+        effect_verified = _is_client_response_accepted(raw_resp) and postcondition_checker(post_obs)
 
         result = {
             "schema_version": "1.0",
@@ -227,7 +240,7 @@ class GameAdapterGate:
             self.store.finalize_command_result(result)
             return result
 
-        accepted = bool(raw_resp.get("ok") or raw_resp.get("success"))
+        accepted = _is_client_response_accepted(raw_resp)
         result = {
             "schema_version": "1.0",
             "command_id": intent["command_id"],

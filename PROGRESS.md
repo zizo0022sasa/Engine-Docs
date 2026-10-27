@@ -6,9 +6,9 @@
 
 ## 1. الحالة الراهنة للمشروع (`Current Snapshot`)
 
-* **المرحلة الحالية:** **اكتمال البنية البرمجية والتوثيقية الشاملة ومعالجة العيوب الميدانية الأربعة (`PR-00` حتى `PR-12`)**، متضمنة النواة التفاعلية غير المعطلة `osrs_ee/core/`، ومحرك الملاحة المقيد بالقدرات `osrs_ee/navigation/`، وواجهة المهام المعزولة `osrs_ee/bots/`، ودليل التشغيل [`كيفيه_الاستخدام_من_الالف_للياء.md`](./كيفيه_الاستخدام_من_الالف_للياء.md).
+* **المرحلة الحالية:** **اكتمال البنية البرمجية والتوثيقية الشاملة ومعالجة العيوب الميدانية الأربعة (`PR-12` / `ade6240`) + رقعة التوافق السلكي الكامل مع عميل Microbot الحي (`PR-12.1`)**، متضمنة النواة التفاعلية غير المعطلة `osrs_ee/core/`، ومحرك الملاحة المقيد بالقدرات `osrs_ee/navigation/`، وواجهة المهام المعزولة `osrs_ee/bots/`، وتوافق بورت `8081` المباشر (`/state`, `hitpoints`/`/skills`, `WIDGET_CLICK -> /widgets/click`).
 * **نتيجة فحص الأسرار (`Secret Scan`):** `[SECRET_SCAN_OK] Zero secret patterns detected under .`
-* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`42 passed` (0 failed)** عبر 12 ملف اختبار تغطي مصفوفة القبول الموسعة `T01..T36`.
+* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`45 passed` (0 failed)** عبر 13 ملف اختبار تغطي مصفوفة القبول الموسعة `T01..T39`.
 * **التمييز المعرفي الدقيق (`Epistemic Status`):**
   * **`HERMETIC_VERIFIED`:** جميع المحركات، العقود، قواعد `SQLite WAL`، خزنة الأسرار `0600`، خادم التحويل المحلي `LocalSocks5Sidecar`، العزل، مشرف الجلسة، حلال الحوارات، مستشار الـ AI، بوابة التليجرام وحارس `<500MB`، حاسبة `RSS` وبوابة `Canary`، دفتر البورصة `GEOrderLedger`، وواجهة `CLI` محققة آلياً بالكامل.
   * **`PENDING_OWNER_HOST_RUN`:** التشغيل الحي ضد خوادم Jagex الفعلية وواجهة Telegram الحية يتم على جهاز المالك (Windows أو Linux VPS) باتباع خطوات `كيفيه_الاستخدام_من_الالف_للياء.md` بعد تدوير توكن البوت وتوفير ملف `Microbot JAR` وبروكسيات `SOCKS5`.
@@ -30,7 +30,8 @@
 | **`PR-07`** | `cb1d888` | بناء `LogQuotaGuardian` (`< 500MB` مع حماية الحوادث المفتوحة)، `BoundedOutbox`، و`TelegramGateway` (`Default-Deny RBAC`). | `34 passed` (`T02, T03, T29`) |
 | **`PR-09` + `10`** | `4d04f9d` | بناء `RssCapacityCalculator`، `StaggeredLaunchPlanner (>=90s)`، `MicrobreakCoordinator`، `ReleaseStagingGate`، و`GEOrderLedger` بضريبة 2% وقفل أدوات الوصفة النشطة. | `37 passed` (`T15, T18, T24, T30`) |
 | **`PR-11`** | `b06ec3c` | بناء واجهة التشغيل الموحدة `osrs_ee/cli.py` + `.env.example` + اختبار التكامل الشامل `test_pr11_cli_e2e.py` + الدليل الكامل `كيفيه_الاستخدام_من_الالف_للياء.md`. | `38 passed` (`T01..T32`) |
-| **`PR-12`** | *(التزام المعالجة الميدانية)* | المعالجة الجذرية للعيوب الميدانية الأربعة (`AUD-36..39` / `ADR-009..012`): `ReactiveSafetyWatchdog` بدون انتظار ساكن، `ConstrainedWaypointGraph` لممرات المستوى 3 الآمنة، `SessionLifecycleManager` بالإنعاش الذاتي، وفصل `ExecutionEngineKernel` عن `osrs_ee/bots/`. | **`42 passed`** (`T01..T36`) |
+| **`PR-12`** | `ade6240` | المعالجة الجذرية للعيوب الميدانية الأربعة (`AUD-36..39` / `ADR-009..012`): `ReactiveSafetyWatchdog` بدون انتظار ساكن، `ConstrainedWaypointGraph` لممرات المستوى 3 الآمنة، `SessionLifecycleManager` بالإنعاش الذاتي، وفصل `ExecutionEngineKernel` عن `osrs_ee/bots/`. | `42 passed` (`T01..T36`) |
+| **`PR-12.1`** | *(رقعة التوافق السلكي الحي)* | إغلاق فجوات التوافق السلكي الثلاث مع عميل Microbot الحي (`AUD-40..42` / `ADR-013`): تطبيع نقاط الحياة ضد `None` (`hitpoints/maxHitpoints` + `/skills?name=Hitpoints`)، دعم `WIDGET_CLICK -> POST /widgets/click`، واعتماد `status_endpoint="/state"` افتراضياً مع سقوط تلقائي ذكي لـ `/status`. | **`45 passed`** (`T01..T39`) |
 
 ---
 

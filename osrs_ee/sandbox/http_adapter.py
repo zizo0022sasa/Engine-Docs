@@ -1,11 +1,17 @@
-"""Loopback-only Keep-Alive HTTP client for Microbot AgentServerPlugin (PR-05a + PR-12 / T06, T10, T33, T35).
+"""Loopback-only Keep-Alive HTTP client for Microbot AgentServerPlugin (PR-05a + PR-12 + PR-12.1).
 
-Key Field-Remediation Enhancements (PR-12):
+Key Field-Remediation & Live Wire-Compatibility Guarantees:
 1. Persistent HTTP/1.1 Keep-Alive `HTTPConnection` on `127.0.0.1:<port>` (eliminates cascading TCP handshake overhead).
 2. Single-Tick Snapshot Coalescing (`coalesce_window_ms`) so safety, navigation, and task engines share 1 tick read.
-3. Short-Circuit Login Guard: when `/status` (or `/state`) reports `loggedIn=False` / `LOGIN_SCREEN`, returns
-   cleanly in 1 HTTP call without polling `/varps`, `/bank`, `/inventory`, or `/skills` against an empty session.
-4. Supports both canonical `/status` and live AgentServer `/state` + `/skills` payload shapes seamlessly.
+3. Short-Circuit Login Guard: when `/state` (or `/status`) reports `loggedIn=False` / `LOGIN_SCREEN`, returns
+   cleanly in 1 HTTP call without polling `/varps`, `/bank`, `/inventory`, `/skills`, or `/dialogue`.
+4. Default `status_endpoint="/state"` (matching live Microbot `StateHandler`) with sticky automatic `404`
+   discovery fallback (`/state <-> /status`) for legacy mock servers.
+5. Null-safe Hitpoints / Vitals normalization across all Microbot payload variants (`hitpoints` / `maxHitpoints`,
+   `hpCurrent` / `hpMax`, nested `player.*`, and `GET /skills?name=Hitpoints` `boostedLevel` / `level`),
+   preserving `0` HP accurately without ever emitting `hp_current: None`.
+6. Full live `WIDGET_CLICK` -> `POST /widgets/click` support (`groupId`+`childId` or `text`) and response
+   boolean normalization (`ok`, `success`, `clicked`, `opened`, `closed`).
 """
 
 from __future__ import annotations
@@ -19,6 +25,31 @@ from datetime import datetime, timezone
 from typing import Any
 
 from osrs_ee.contracts.models import validate_observation
+
+
+class EndpointNotFoundError(ConnectionError):
+    """Raised when an AgentServer HTTP path returns HTTP 404 Not Found."""
+
+
+def _first_int(*candidates: Any) -> int | None:
+    """Return the first numeric candidate as int without treating 0 as falsy."""
+    for val in candidates:
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, (int, float)):
+            return int(val)
+    return None
+
+
+def _normalize_command_response(res: dict[str, Any]) -> dict[str, Any]:
+    """Ensure canonical `ok` boolean exists alongside live AgentServer keys (`success`/`clicked`/`opened`/`closed`)."""
+    out = dict(res)
+    if "ok" not in out:
+        for key in ("success", "clicked", "opened", "closed"):
+            if key in out and isinstance(out[key], bool):
+                out["ok"] = out[key]
+                break
+    return out
 
 
 class MicrobotHttpAdapter:
@@ -37,7 +68,7 @@ class MicrobotHttpAdapter:
         host: str = "127.0.0.1",
         timeout_sec: float = 4.0,
         coalesce_window_ms: int = 0,
-        status_endpoint: str = "/status",
+        status_endpoint: str = "/state",
     ) -> None:
         if host != "127.0.0.1":
             raise ValueError(f"AgentServer HTTP adapter MUST bind to 127.0.0.1 only, got {host!r}")
@@ -59,18 +90,22 @@ class MicrobotHttpAdapter:
         self.timeout_sec = timeout_sec
         self.coalesce_window_ms = max(0, int(coalesce_window_ms))
         self.status_endpoint = status_endpoint
+        self._active_status_endpoint = status_endpoint
 
         self.alive = True
         self.plugin_running = False
         self.auto_login_suppressed = False
         self.player_dead = False
         self.equipment_items: list[str] = []
+        self.last_dialogue_snapshot: dict[str, Any] = {}
 
         self._lock = threading.RLock()
         self._conn: http.client.HTTPConnection | None = None
         self._obs_seq = 0
         self._cached_obs: dict[str, Any] | None = None
         self._cached_at_mono_ms: int = -1_000_000
+        self._supports_skills_endpoint: bool = True
+        self._supports_dialogue_endpoint: bool = True
         self.http_request_count = 0
         self.tcp_connect_count = 0
 
@@ -119,10 +154,12 @@ class MicrobotHttpAdapter:
                     self.http_request_count += 1
                     if resp.status in (401, 403):
                         raise PermissionError(f"AgentServer rejected X-Agent-Token with HTTP {resp.status}")
+                    if resp.status == 404:
+                        raise EndpointNotFoundError(f"AgentServer HTTP 404 on {path}")
                     if resp.status >= 400:
                         raise ConnectionError(f"AgentServer HTTP {resp.status} on {path}")
                     return json.loads(raw) if raw else {}
-                except PermissionError:
+                except (PermissionError, EndpointNotFoundError):
                     raise
                 except http.client.BadStatusLine as exc:
                     self._reset_conn()
@@ -140,17 +177,100 @@ class MicrobotHttpAdapter:
 
         raise ConnectionError(f"Unreachable retry loop on {path}")
 
+    def _fetch_status_with_fallback(self) -> dict[str, Any]:
+        """Query `/state` by default and sticky-fallback to `/status` (or vice versa) on HTTP 404."""
+        primary = self._active_status_endpoint
+        try:
+            return self._request_json("GET", primary)
+        except EndpointNotFoundError:
+            alt = "/status" if primary == "/state" else "/state"
+            res = self._request_json("GET", alt)
+            self._active_status_endpoint = alt
+            return res
+
+    def _fetch_optional_json(self, path: str, *, flag_attr: str) -> dict[str, Any] | None:
+        if not getattr(self, flag_attr, True):
+            return None
+        try:
+            return self._request_json("GET", path)
+        except EndpointNotFoundError:
+            setattr(self, flag_attr, False)
+            return None
+
     @staticmethod
     def _parse_login_state(status: dict[str, Any]) -> str:
         if "loginState" in status and isinstance(status["loginState"], str):
             return status["loginState"]
         if "loggedIn" in status:
             return "LOGGED_IN" if bool(status["loggedIn"]) else "LOGIN_SCREEN"
+        game_state = status.get("gameState")
+        if isinstance(game_state, str) and game_state:
+            return "LOGGED_IN" if game_state == "LOGGED_IN" else "LOGIN_SCREEN"
         return "UNKNOWN"
+
+    def _extract_normalized_vitals(self, status: dict[str, Any]) -> dict[str, Any] | None:
+        """Normalize HP, Run Energy, and Combat status across all Microbot `/state` + `/skills` formats."""
+        player_obj = status.get("player") if isinstance(status.get("player"), dict) else {}
+
+        hp_curr = _first_int(
+            status.get("hpCurrent"),
+            status.get("hitpoints"),
+            player_obj.get("hpCurrent"),
+            player_obj.get("hitpoints"),
+        )
+        hp_max = _first_int(
+            status.get("hpMax"),
+            status.get("maxHitpoints"),
+            player_obj.get("hpMax"),
+            player_obj.get("maxHitpoints"),
+        )
+
+        # Upstream Microbot `StateHandler` omits exact HP in `/state` and serves it on `GET /skills?name=Hitpoints`
+        if hp_curr is None and ("loggedIn" in status or "player" in status):
+            skills_resp = self._fetch_optional_json("/skills?name=Hitpoints", flag_attr="_supports_skills_endpoint")
+            if isinstance(skills_resp, dict) and isinstance(skills_resp.get("skills"), list):
+                for sk in skills_resp["skills"]:
+                    if isinstance(sk, dict) and str(sk.get("name", "")).lower() == "hitpoints":
+                        hp_curr = _first_int(sk.get("boostedLevel"), sk.get("level"))
+                        if hp_max is None:
+                            hp_max = _first_int(sk.get("level"), sk.get("boostedLevel"))
+                        break
+
+        has_any_vital_signal = (
+            hp_curr is not None
+            or hp_max is not None
+            or any(
+                k in status
+                for k in ("hpCurrent", "hitpoints", "hpMax", "maxHitpoints", "runEnergy", "runEnabled", "underAttack")
+            )
+            or bool(player_obj)
+        )
+        if not has_any_vital_signal:
+            return None
+
+        resolved_max = max(1, hp_max if hp_max is not None else (hp_curr if hp_curr is not None and hp_curr > 0 else 10))
+        resolved_curr = hp_curr if hp_curr is not None else resolved_max
+        run_energy = _first_int(status.get("runEnergy"), player_obj.get("runEnergy"))
+        resolved_run_energy = max(0, min(100, run_energy if run_energy is not None else 100))
+        run_enabled = bool(status.get("runEnabled", player_obj.get("runEnabled", False)))
+        under_attack = bool(
+            status.get(
+                "underAttack",
+                player_obj.get("underAttack", player_obj.get("interacting", False)),
+            )
+        )
+
+        return {
+            "hp_current": resolved_curr,
+            "hp_max": resolved_max,
+            "run_energy": resolved_run_energy,
+            "run_enabled": run_enabled,
+            "under_attack": under_attack,
+        }
 
     def probe_session_state(self) -> dict[str, Any]:
         """Single lightweight HTTP probe used by `SessionLifecycleManager` (`DISCONNECTED / AT_LOGIN / IN_GAME`)."""
-        status = self._request_json("GET", self.status_endpoint)
+        status = self._fetch_status_with_fallback()
         login_state = self._parse_login_state(status)
         logged_in = login_state == "LOGGED_IN"
         return {
@@ -175,13 +295,14 @@ class MicrobotHttpAdapter:
             ):
                 return dict(self._cached_obs)
 
-        status = self._request_json("GET", self.status_endpoint)
+        status = self._fetch_status_with_fallback()
         login_state = self._parse_login_state(status)
         self._obs_seq += 1
 
         # PR-12 / Defect #3 Fix: Short-circuit immediately when NOT logged in!
-        # Never fire /varps, /bank, or /inventory against an unauthenticated login screen!
+        # Never fire /varps, /bank, /inventory, /skills, or /dialogue against an unauthenticated login screen!
         if login_state != "LOGGED_IN":
+            self.last_dialogue_snapshot = {}
             obs_logged_out = validate_observation(
                 {
                     "schema_version": "1.0",
@@ -219,6 +340,20 @@ class MicrobotHttpAdapter:
         varp_281_resp = self._request_json("GET", "/varps?id=281")
         bank_resp = self._request_json("GET", "/bank")
         inv_resp = self._request_json("GET", "/inventory")
+
+        # Dialogue state: prefer explicit `dialogueOpen` if present, else query `/dialogue` when live `/state` is used
+        if "dialogueOpen" in status:
+            dialogue_open = bool(status.get("dialogueOpen", False))
+        elif "loggedIn" in status or "player" in status:
+            dlg_resp = self._fetch_optional_json("/dialogue", flag_attr="_supports_dialogue_endpoint")
+            if isinstance(dlg_resp, dict):
+                self.last_dialogue_snapshot = dlg_resp
+                dialogue_open = bool(dlg_resp.get("inDialogue", dlg_resp.get("dialogueOpen", False)))
+            else:
+                self.last_dialogue_snapshot = {}
+                dialogue_open = False
+        else:
+            dialogue_open = False
 
         # Support both `status["position"]` and live AgentServer `status["player"]["position"]`
         pos_raw = status.get("position") or (status.get("player") or {}).get("position")
@@ -286,7 +421,7 @@ class MicrobotHttpAdapter:
             "quest_points": _opt_metric("questPoints"),
             "total_level": _opt_metric("totalLevel"),
             "playtime_minutes": _opt_metric("playtimeMinutes"),
-            "dialogue_open": bool(status.get("dialogueOpen", False)),
+            "dialogue_open": dialogue_open,
             "bank": {
                 "is_open": bank_open,
                 "pin_prompt_open": pin_open,
@@ -296,14 +431,9 @@ class MicrobotHttpAdapter:
             "inventory": inv_obj,
         }
 
-        if any(k in status for k in ("hpCurrent", "runEnergy", "underAttack")):
-            obs["vitals"] = {
-                "hp_current": status.get("hpCurrent"),
-                "hp_max": status.get("hpMax", 10),
-                "run_energy": status.get("runEnergy", 100),
-                "run_enabled": bool(status.get("runEnabled", False)),
-                "under_attack": bool(status.get("underAttack", False)),
-            }
+        normalized_vitals = self._extract_normalized_vitals(status)
+        if normalized_vitals is not None:
+            obs["vitals"] = normalized_vitals
 
         validated = validate_observation(obs)
         with self._lock:
@@ -318,37 +448,64 @@ class MicrobotHttpAdapter:
         if command_type == "PLUGIN_STOP":
             res = self._request_json("POST", "/scripts/stop", payload)
             self.plugin_running = False
-            return res
+            return _normalize_command_response(res)
         if command_type == "SAFE_LOGOUT":
             res = self._request_json("POST", "/logout", {})
             self.auto_login_suppressed = True
-            return res
+            return _normalize_command_response(res)
         if command_type == "TRIGGER_LOGIN":
-            return self._request_json("POST", "/login", {"wait": False})
+            return _normalize_command_response(self._request_json("POST", "/login", {"wait": False}))
         if command_type == "WALK_TO_WORLD_POINT":
-            return self._request_json("POST", "/walk", payload)
+            return _normalize_command_response(self._request_json("POST", "/walk", payload))
         if command_type == "CONSUME_FOOD":
-            return self._request_json(
-                "POST",
-                "/inventory/interact",
-                {"id": int(payload["item_id"]), "action": "Eat"},
+            return _normalize_command_response(
+                self._request_json(
+                    "POST",
+                    "/inventory/interact",
+                    {"id": int(payload["item_id"]), "action": "Eat"},
+                )
             )
         if command_type == "SET_RUN_MODE":
-            return self._request_json("POST", "/run", {"enabled": bool(payload.get("enabled", True))})
+            try:
+                return _normalize_command_response(
+                    self._request_json("POST", "/run", {"enabled": bool(payload.get("enabled", True))})
+                )
+            except EndpointNotFoundError:
+                # Upstream AgentServerPlugin toggles run via Minimap Run Orb widget (160, 27)
+                return _normalize_command_response(
+                    self._request_json("POST", "/widgets/click", {"groupId": 160, "childId": 27})
+                )
+        if command_type == "WIDGET_CLICK":
+            req_body: dict[str, Any] = {}
+            if "groupId" in payload or "group_id" in payload:
+                req_body["groupId"] = int(payload["groupId"] if "groupId" in payload else payload["group_id"])
+            if "childId" in payload or "child_id" in payload:
+                req_body["childId"] = int(payload["childId"] if "childId" in payload else payload["child_id"])
+            if "text" in payload and payload["text"] is not None:
+                req_body["text"] = str(payload["text"])
+            if not (("groupId" in req_body and "childId" in req_body) or "text" in req_body):
+                raise ValueError("WIDGET_CLICK requires ('groupId' and 'childId') or 'text'")
+            return _normalize_command_response(self._request_json("POST", "/widgets/click", req_body))
         if command_type == "INTERACT_OBJECT":
-            return self._request_json("POST", "/objects/interact", payload)
+            return _normalize_command_response(self._request_json("POST", "/objects/interact", payload))
         if command_type == "DIALOGUE_SELECT":
-            return self._request_json("POST", "/dialogue/select", payload)
+            return _normalize_command_response(self._request_json("POST", "/dialogue/select", payload))
         if command_type == "DIALOGUE_CONTINUE":
-            return self._request_json("POST", "/dialogue/continue", {})
+            return _normalize_command_response(self._request_json("POST", "/dialogue/continue", {}))
         if command_type == "BANK_OPEN":
-            return self._request_json("POST", "/bank/open", {})
+            return _normalize_command_response(self._request_json("POST", "/bank/open", {}))
         if command_type == "BANK_CLOSE":
-            return self._request_json("POST", "/bank/close", {})
+            return _normalize_command_response(self._request_json("POST", "/bank/close", {}))
         if command_type == "BANK_DEPOSIT_INVENTORY":
-            return self._request_json("POST", "/bank/deposit-all", {})
+            try:
+                return _normalize_command_response(self._request_json("POST", "/bank/deposit", {"all": True}))
+            except EndpointNotFoundError:
+                return _normalize_command_response(self._request_json("POST", "/bank/deposit-all", {}))
         if command_type == "BANK_WITHDRAW_ITEM":
-            return self._request_json("POST", "/bank/withdraw", payload)
+            withdraw_body = dict(payload)
+            if "item_id" in withdraw_body and "id" not in withdraw_body:
+                withdraw_body["id"] = int(withdraw_body.pop("item_id"))
+            return _normalize_command_response(self._request_json("POST", "/bank/withdraw", withdraw_body))
         raise ValueError(f"Unsupported HTTP command_type: {command_type}")
 
     def kill_process_tree(self) -> None:

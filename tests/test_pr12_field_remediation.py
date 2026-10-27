@@ -163,7 +163,7 @@ def test_t33_non_blocking_reactive_watchdog_pipelined_eat_run_move_and_keepalive
         def do_GET(self) -> None:  # noqa: N802
             endpoint_hits.append(self.path)
             payload_map: dict[str, Any] = {
-                "/status": {
+                "/state": {
                     "loginState": "LOGGED_IN",
                     "gameTick": 500,
                     "world": 308,

@@ -22,6 +22,15 @@ from osrs_ee.runtime.adapter_gate import GameAdapterGate
 from osrs_ee.state.fsm import AccountStatus, ReasonCode
 
 
+def _coalesce_int(val: Any, fallback: int) -> int:
+    """Null-safe integer normalizer preventing TypeError when live client omits or nulls a field."""
+    if isinstance(val, bool):
+        return fallback
+    if isinstance(val, (int, float)):
+        return int(val)
+    return fallback
+
+
 @dataclass(frozen=True)
 class KernelTickResult:
     lifecycle_state: ClientLifecycleState
@@ -164,23 +173,23 @@ class ExecutionEngineKernel:
             int(obs["position"]["y"]),
             int(obs["position"]["plane"]),
         )
-        vitals = obs.get("vitals") or {
-            "hp_current": self.capabilities.skill_level("hitpoints"),
-            "hp_max": self.capabilities.skill_level("hitpoints"),
-            "run_energy": 100,
-            "run_enabled": False,
-            "under_attack": False,
-        }
+        default_hp = self.capabilities.skill_level("hitpoints")
+        raw_vitals = obs.get("vitals") or {}
+        hp_max_val = max(1, _coalesce_int(raw_vitals.get("hp_max"), default_hp))
+        hp_curr_val = _coalesce_int(raw_vitals.get("hp_current"), hp_max_val)
+        run_energy_val = _coalesce_int(raw_vitals.get("run_energy"), 100)
+        run_enabled_val = bool(raw_vitals.get("run_enabled", False))
+        under_attack_val = bool(raw_vitals.get("under_attack", False))
         inv_items = obs["inventory"]["items"] or []
 
         # 3. Non-Blocking Reactive Safety Watchdog (pipelined Eat + Run without stopping movement!)
         safety: SafetyDecision = self.watchdog.evaluate_pulse(
             game_tick=curr_tick,
-            hp_current=int(vitals["hp_current"]),
-            hp_max=int(vitals["hp_max"]),
-            run_energy=int(vitals["run_energy"]),
-            run_enabled=bool(vitals["run_enabled"]),
-            under_attack=bool(vitals["under_attack"]),
+            hp_current=hp_curr_val,
+            hp_max=hp_max_val,
+            run_energy=run_energy_val,
+            run_enabled=run_enabled_val,
+            under_attack=under_attack_val,
             position=pos_tuple,
             inventory_items=inv_items,
         )
@@ -230,15 +239,19 @@ class ExecutionEngineKernel:
             )
             dispatched.append("SET_RUN_MODE")
 
-        # 4. Evaluate pure pluggable TaskModule
+        # 4. Evaluate pure pluggable TaskModule (enriching dialogue from live adapter if available)
+        live_dlg = getattr(self.gate.adapter, "last_dialogue_snapshot", {}) or {}
+        eff_q = dialogue_question or str(live_dlg.get("question") or live_dlg.get("dialogueText") or "")
+        eff_opts = dialogue_options or tuple(live_dlg.get("options") or ())
+
         ctx = TickContext(
             game_tick=curr_tick,
             position=WorldPoint(*pos_tuple),
             capabilities=self.capabilities,
             inventory_items=tuple(inv_items),
             dialogue_open=bool(obs["dialogue_open"]),
-            dialogue_question=dialogue_question,
-            dialogue_options=dialogue_options,
+            dialogue_question=eff_q,
+            dialogue_options=eff_opts,
             varbits=varbits or {},
             tutorial_varp_281=int(obs["tutorial_varp_281"]["value"] or 0),
             in_danger=safety.in_danger,
@@ -278,6 +291,13 @@ class ExecutionEngineKernel:
                 postcondition_checker=lambda _post: True,
             )
             dispatched.append("INTERACT_OBJECT")
+
+        elif directive.directive_type == DirectiveType.CLICK_WIDGET:
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent("WIDGET_CLICK", dict(directive.payload)),
+                postcondition_checker=lambda _post: True,
+            )
+            dispatched.append("WIDGET_CLICK")
 
         elif directive.directive_type == DirectiveType.SELECT_DIALOGUE:
             self.gate.dispatch_verified_command(

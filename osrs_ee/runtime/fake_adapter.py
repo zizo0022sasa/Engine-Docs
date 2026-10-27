@@ -308,6 +308,13 @@ class FakeGameAdapter:
         if command_type in ("INTERACT_OBJECT", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
             return {"ok": True}
 
+        if command_type == "WIDGET_CLICK":
+            has_coords = "groupId" in payload and "childId" in payload
+            has_text = bool(payload.get("text"))
+            if not (has_coords or has_text):
+                return {"ok": False, "clicked": False, "reason": "Provide groupId+childId or text"}
+            return {"ok": True, "clicked": True}
+
         raise ValueError(f"Unsupported command_type on FakeGameAdapter: {command_type}")
 
     def _add_to_bank(self, item: dict[str, Any]) -> None:

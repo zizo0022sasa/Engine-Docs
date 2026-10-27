@@ -37,6 +37,7 @@
         "BANK_DEPOSIT_EQUIPMENT",
         "BANK_WITHDRAW_ITEM",
         "INTERACT_OBJECT",
+        "WIDGET_CLICK",
         "DIALOGUE_SELECT",
         "DIALOGUE_CONTINUE",
         "WALK_TO_WORLD_POINT",

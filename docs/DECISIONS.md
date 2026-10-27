@@ -78,6 +78,14 @@
 * **القرار:** عزل البنية التحتية للاتصال والسلامة التفاعلية ودورة الحياة والملاحة داخل `ExecutionEngineKernel`، وإلزام جميع المهام في `osrs_ee/bots/` بواجهة نقية موحدة (`TaskModule.evaluate_tick(TickContext) -> TaskDirective`) مفحوصة آلياً عبر `AST` لضمان خلوها التام من أي كود شبكي أو انتظار ساكن أو منطق أمان داخلي.
 * **السبب والثقة:** ضمان إمكانية إضافة أو استبدال أي بوت مستقبلي دون أدنى خطر انحدار (`Regression`) على أمان واستقرار البنية التحتية. (الثقة: عالية جداً — مختبر بـ `T36`).
 
+### `ADR-013` — المواءمة السلكية المباشرة مع عميل `Microbot AgentServerPlugin` الحي (`8081`) والتطبيع الآمن ضد `None`
+* **الحالة:** `ACCEPTED` | **المصادر:** `AUD-40`, `AUD-41`, `AUD-42` (`Live Field Inspector Audit of ade6240`)
+* **القرار:**
+  1. اعتماد `status_endpoint="/state"` كمسار افتراضي قياسي في `MicrobotHttpAdapter` مطابقاً لـ `StateHandler.java` في عميل Microbot الحي، مع تبديل تلقائي لاصق (`Sticky 404 Fallback`) إلى `/status` عند الاتصال بخوادم الاختبار القديمة.
+  2. تطبيع قراءة نقاط الحياة والحيوية عبر `_first_int` (مع حفظ `0 HP` بدقة) ليدعم `hpCurrent/hpMax` و`hitpoints/maxHitpoints` وحقول `player.*` والاستعلام التلقائي من `GET /skills?name=Hitpoints` (`boostedLevel/level`)، مع حراسة `ExecutionEngineKernel` بالدالة `_coalesce_int` لاستحالة وقوع `TypeError` عند غياب أي حقل.
+  3. اعتماد `WIDGET_CLICK` كأمر معماري رسمي في المخططات و`GameAdapterGate` و`DirectiveType.CLICK_WIDGET` وتوجيهه إلى `POST /widgets/click` (`groupId+childId` أو `text`) مع تطبيع مفاتيح الاستجابة الحية (`ok / success / clicked / opened / closed`) ومواءمة `/bank/deposit` (`{"all": true}`) وبديل أيقونة الجري `(160, 27)`.
+* **السبب والثقة:** ضمان التشغيل الميداني المباشر مع عميل Microbot الفعلي على المنفذ `8081` من أول اتصال دون أخطاء `TypeError` أو `HTTP 404` أو رفض أوامر الواجهات. (الثقة: عالية جداً — محقق ضد كود `AgentServerPlugin` المصدري ومختبر بـ `T37, T38, T39`).
+
 ---
 
 ## 2. القرارات المعلقة بانتظار المالك (`Pending Owner Decisions`)
