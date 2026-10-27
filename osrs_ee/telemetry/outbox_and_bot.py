@@ -145,11 +145,13 @@ class TelegramGateway:
         outbox: BoundedOutbox,
         supervisor: SingleSlotSupervisor | None = None,
         redactor: Redactor | None = None,
+        allowed_chat_ids: set[int] | None = None,
     ) -> None:
         self.store = store
         self.outbox = outbox
         self.supervisor = supervisor
         self.redactor = redactor or Redactor()
+        self.allowed_chat_ids = set(allowed_chat_ids) if allowed_chat_ids is not None else None
         self.security_audit_events: list[str] = []
 
     def handle_incoming(
@@ -163,6 +165,11 @@ class TelegramGateway:
         """Process a command or callback button; returns None (silent drop) on unauthorized user!"""
         now_dt = now_utc or datetime.now(timezone.utc)
         msg = text_or_callback.strip()
+
+        # 0. Optional perimeter chat_id allowlist from .env (ALLOWED_CHAT_IDS + DEFAULT_CHANNEL_ID)
+        if self.allowed_chat_ids is not None and chat_id not in self.allowed_chat_ids:
+            self.security_audit_events.append(f"DISALLOWED_CHAT_DROP user={user_id} chat={chat_id}")
+            return None
 
         # 1. Default-Deny base check: must at least be VIEWER to interact at all
         try:
@@ -193,16 +200,25 @@ class TelegramGateway:
             except (AuthorizationDeniedError, ApprovalRejectedError) as exc:
                 return self.redactor.redact_text(f"⛔ رُفضت الموافقة: {exc}")
 
-        # 3. Text commands
+        # 3. Text commands (strip optional @bot_username suffix in groups/channels)
         tokens = msg.split()
-        cmd = tokens[0].lower() if tokens else ""
+        cmd = tokens[0].split("@", 1)[0].lower() if tokens else ""
 
         if cmd == "/status":
             rows = self.store._conn.execute(
                 "SELECT status, COUNT(*) AS c FROM accounts GROUP BY status ORDER BY status"
             ).fetchall()
-            summary = ", ".join(f"{r['status']}={r['c']}" for r in rows) or "لا توجد حسابات"
-            return self.redactor.redact_text(f"📊 ملخص الأسطول: {summary}")
+            total_acc = sum(int(r["c"]) for r in rows)
+            active_leases = int(
+                self.store._conn.execute("SELECT COUNT(*) AS c FROM active_leases").fetchone()["c"]
+            )
+            summary = (
+                ", ".join(f"{r['status']}={r['c']}" for r in rows)
+                or "لا توجد حسابات مسجلة بعد (جاهز لاستقبال accounts.txt)"
+            )
+            return self.redactor.redact_text(
+                f"📊 ملخص الأسطول (الإجمالي: {total_acc} | الجلسات النشطة: {active_leases}): {summary}"
+            )
 
         if cmd in ("/2fa", "/blocked"):
             try:
@@ -285,3 +301,105 @@ class TelegramGateway:
                 return (False, 5.0)
 
         return _send
+
+    @staticmethod
+    def fetch_bot_me(bot_token: str, *, timeout_sec: float = 6.0) -> dict[str, Any]:
+        """Verify live Telegram Bot API connectivity via `GET /getMe` without exposing token."""
+        api_url = f"https://api.telegram.org/bot{bot_token}/getMe"
+        req = urllib.request.Request(api_url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if not payload.get("ok"):
+            raise RuntimeError("Telegram getMe returned ok=false")
+        res = payload.get("result") or {}
+        return {
+            "id": res.get("id"),
+            "username": res.get("username"),
+            "first_name": res.get("first_name"),
+            "can_join_groups": res.get("can_join_groups"),
+        }
+
+    def poll_updates_once(
+        self,
+        bot_token: str,
+        *,
+        offset: int = 0,
+        timeout_sec: int = 2,
+        token_rotation_confirmed: bool = False,
+    ) -> tuple[int, int]:
+        """Poll `GET /getUpdates` once, process authorized commands/callbacks, and reply cleanly."""
+        sender = self.build_live_bot_sender(
+            bot_token, token_rotation_confirmed=token_rotation_confirmed
+        )
+        api_url = (
+            f"https://api.telegram.org/bot{bot_token}/getUpdates"
+            f"?offset={int(offset)}&timeout={max(0, int(timeout_sec))}&limit=25"
+        )
+        req = urllib.request.Request(api_url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=max(5.0, float(timeout_sec) + 5.0)) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                # Another poller instance is active — return cleanly without crashing
+                return (offset, 0)
+            raise
+
+        updates = data.get("result") or []
+        next_offset = offset
+        processed = 0
+
+        for upd in updates:
+            upd_id = int(upd.get("update_id", 0))
+            if upd_id >= next_offset:
+                next_offset = upd_id + 1
+
+            cb = upd.get("callback_query")
+            if isinstance(cb, dict):
+                from_obj = cb.get("from") or {}
+                msg_obj = cb.get("message") or {}
+                chat_obj = msg_obj.get("chat") or {}
+                uid = from_obj.get("id")
+                cid = chat_obj.get("id")
+                cb_data = str(cb.get("data") or "")
+                if uid is not None and cid is not None and cb_data:
+                    reply = self.handle_incoming(
+                        user_id=int(uid), chat_id=int(cid), text_or_callback=cb_data
+                    )
+                    if reply:
+                        sender(int(cid), reply)
+                        processed += 1
+                    cb_id = cb.get("id")
+                    if cb_id:
+                        try:
+                            ack_req = urllib.request.Request(
+                                f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery",
+                                data=json.dumps({"callback_query_id": cb_id}).encode("utf-8"),
+                                headers={"Content-Type": "application/json"},
+                                method="POST",
+                            )
+                            urllib.request.urlopen(ack_req, timeout=4.0).close()
+                        except Exception:
+                            pass
+                continue
+
+            msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post")
+            if isinstance(msg, dict):
+                text = str(msg.get("text") or "").strip()
+                if not text:
+                    continue
+                chat_obj = msg.get("chat") or {}
+                from_obj = msg.get("from") or {}
+                cid = chat_obj.get("id")
+                uid = from_obj.get("id") if from_obj.get("id") is not None else cid
+                if uid is not None and cid is not None:
+                    reply = self.handle_incoming(
+                        user_id=int(uid), chat_id=int(cid), text_or_callback=text
+                    )
+                    if reply:
+                        sender(int(cid), reply)
+                        processed += 1
+
+        # Also flush any pending outbox messages
+        self.outbox.flush_due(sender)
+        return (next_offset, processed)

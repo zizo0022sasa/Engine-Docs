@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,40 @@ class ScanFinding:
     match_length: int
 
 
+_AUTHORIZED_GITIGNORED_LOCAL_FILES = frozenset({".env", "accounts.txt"})
+
+
+def _git_safe_untracked_ignored_relpaths(repo_root: Path) -> set[str]:
+    """Return local runtime secret filenames ONLY if ignored by .gitignore AND NOT tracked in git."""
+    if not (repo_root / ".git").exists():
+        return set()
+    candidates = [name for name in _AUTHORIZED_GITIGNORED_LOCAL_FILES if (repo_root / name).is_file()]
+    if not candidates:
+        return set()
+    try:
+        tracked_proc = subprocess.run(
+            ["git", "ls-files", "--", *candidates],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        tracked = set(tracked_proc.stdout.strip().splitlines())
+        ignored_proc = subprocess.run(
+            ["git", "check-ignore", "--", *candidates],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        ignored = set(ignored_proc.stdout.strip().splitlines())
+        return ignored - tracked
+    except OSError:
+        return set()
+
+
 def scan_path(root: str | Path) -> list[ScanFinding]:
     """Scan a file or directory tree for high-confidence secret patterns."""
     root_path = Path(root).resolve()
@@ -73,11 +108,15 @@ def scan_path(root: str | Path) -> list[ScanFinding]:
         base = root_path.parent
     else:
         base = root_path
+        safe_local_ignored = _git_safe_untracked_ignored_relpaths(root_path)
         files = []
         for dirpath, dirnames, filenames in os.walk(root_path):
             dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
             for fn in filenames:
                 fp = Path(dirpath) / fn
+                rel_candidate = fp.relative_to(base).as_posix()
+                if rel_candidate in safe_local_ignored:
+                    continue
                 if fp.suffix.lower() not in _BINARY_EXTS:
                     files.append(fp)
 

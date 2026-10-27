@@ -44,10 +44,10 @@ from osrs_ee.sandbox import (
 )
 from osrs_ee.security.redaction import Redactor
 from osrs_ee.security.secret_scan import scan_path
-from osrs_ee.security.vault import LocalSecretVault, ingest_pipe_lines
+from osrs_ee.security.vault import LocalSecretVault, ingest_pipe_lines, load_dotenv
 from osrs_ee.state import AccountStatus, OperatorRole, StateStore
 from osrs_ee.tasks import CuratedRecipeRegistry, SingleSlotPilotRunner
-from osrs_ee.telemetry import GLOBAL_STORAGE_BUDGET_BYTES, BoundedOutbox, LogQuotaGuardian
+from osrs_ee.telemetry import GLOBAL_STORAGE_BUDGET_BYTES, BoundedOutbox, LogQuotaGuardian, TelegramGateway
 
 
 def _resolve_data_dir(raw_dir: str | None) -> Path:
@@ -139,10 +139,16 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     )
     try:
         lines = in_file.read_text(encoding="utf-8").splitlines()
+        non_comment_count = sum(1 for ln in lines if ln.strip() and not ln.strip().startswith("#"))
         summaries = ingest_pipe_lines(lines, vault=vault, store=store)
         store.export_snapshot()
+        total_registered = int(
+            store._conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
+        )
         payload = {
             "ingested_count": len(summaries),
+            "skipped_duplicates": max(0, non_comment_count - len(summaries)),
+            "total_registered_accounts": total_registered,
             "accounts": [
                 {
                     "account_id": s.account_id,
@@ -375,6 +381,169 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
         print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
         return 0
     finally:
+        store.close()
+
+
+def _parse_int_csv(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    out: list[int] = []
+    for part in raw.split(","):
+        s = part.strip()
+        if not s:
+            continue
+        out.append(int(s))
+    return out
+
+
+def _build_telegram_env_context(data_dir: Path) -> tuple[Redactor, StateStore, BoundedOutbox, TelegramGateway, dict[str, Any]]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    redactor = (
+        LocalSecretVault(data_dir / "vault.json").redactor
+        if (data_dir / "vault.json").exists()
+        else Redactor()
+    )
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if bot_token and not bot_token.startswith("<"):
+        redactor.register_secret(bot_token)
+
+    rotated = os.environ.get("TELEGRAM_TOKEN_ROTATED", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    admin_chats = _parse_int_csv(os.environ.get("TELEGRAM_CHAT_ID"))
+    allowed_chats = _parse_int_csv(os.environ.get("ALLOWED_CHAT_IDS"))
+    default_channel_raw = os.environ.get("DEFAULT_CHANNEL_ID", "").strip()
+    default_channel = (
+        int(default_channel_raw)
+        if default_channel_raw and not default_channel_raw.startswith("<")
+        else None
+    )
+
+    allowed_set = set(allowed_chats) | set(admin_chats)
+    if default_channel is not None:
+        allowed_set.add(default_channel)
+
+    store = StateStore(
+        data_dir / "state.db",
+        snapshot_path=data_dir / "state_snapshot.json",
+        redactor=redactor,
+    )
+    outbox = BoundedOutbox(data_dir / "outbox.db", redactor=redactor)
+    gw = TelegramGateway(
+        store=store,
+        outbox=outbox,
+        redactor=redactor,
+        allowed_chat_ids=allowed_set if allowed_set else None,
+    )
+    meta = {
+        "bot_token": bot_token,
+        "token_rotated": rotated,
+        "admin_chat_ids": admin_chats,
+        "allowed_chat_ids": sorted(allowed_set),
+        "default_channel_id": default_channel,
+    }
+    return redactor, store, outbox, gw, meta
+
+
+def _cmd_telegram_check(args: argparse.Namespace) -> int:
+    data_dir = _resolve_data_dir(args.data_dir)
+    redactor, store, outbox, gw, meta = _build_telegram_env_context(data_dir)
+    try:
+        acl_rows = store._conn.execute(
+            "SELECT user_id, chat_id, role FROM operator_acl ORDER BY user_id, chat_id"
+        ).fetchall()
+        operators = [
+            {"user_id": int(r["user_id"]), "chat_id": int(r["chat_id"]), "role": str(r["role"])}
+            for r in acl_rows
+        ]
+        status_checks: list[dict[str, Any]] = []
+        for op in operators:
+            resp = gw.handle_incoming(
+                user_id=op["user_id"], chat_id=op["chat_id"], text_or_callback="/status"
+            )
+            status_checks.append(
+                {
+                    "user_id": op["user_id"],
+                    "chat_id": op["chat_id"],
+                    "role": op["role"],
+                    "status_response": resp,
+                }
+            )
+        unauth_resp = gw.handle_incoming(
+            user_id=999999999, chat_id=999999999, text_or_callback="/status"
+        )
+
+        bot_me: dict[str, Any] | None = None
+        processed_live_updates = 0
+        delivered_ping_chats: list[int] = []
+
+        if not args.offline and meta["bot_token"] and not meta["bot_token"].startswith("<"):
+            bot_me = gw.fetch_bot_me(meta["bot_token"])
+            if meta["token_rotated"]:
+                _, processed_live_updates = gw.poll_updates_once(
+                    meta["bot_token"],
+                    offset=0,
+                    timeout_sec=1,
+                    token_rotation_confirmed=True,
+                )
+                if args.send_status_ping and status_checks:
+                    sender = gw.build_live_bot_sender(
+                        meta["bot_token"], token_rotation_confirmed=True
+                    )
+                    sample_status = status_checks[0]["status_response"] or "📊 ملخص الأسطول"
+                    targets: list[int] = []
+                    if meta["default_channel_id"] is not None:
+                        targets.append(int(meta["default_channel_id"]))
+                    targets.extend(int(c) for c in meta["admin_chat_ids"] if int(c) not in targets)
+                    for cid in targets:
+                        ok_send, _ = sender(cid, f"✅ فحص جاهزية OSRS_ee التلقائي:\n{sample_status}")
+                        if ok_send:
+                            delivered_ping_chats.append(cid)
+
+        report = {
+            "ok": bool(status_checks) and unauth_resp is None,
+            "token_configured": bool(meta["bot_token"] and not meta["bot_token"].startswith("<")),
+            "token_rotated": meta["token_rotated"],
+            "allowed_chat_ids": meta["allowed_chat_ids"],
+            "default_channel_id": meta["default_channel_id"],
+            "registered_operators": operators,
+            "status_command_self_test": status_checks,
+            "unauthorized_silent_drop_verified": unauth_resp is None,
+            "live_bot_identity": bot_me,
+            "processed_pending_live_updates": processed_live_updates,
+            "delivered_ping_chats": delivered_ping_chats,
+        }
+        print(redactor.redact_text(json.dumps(report, indent=2, ensure_ascii=False)))
+        return 0 if report["ok"] else 1
+    finally:
+        outbox.close()
+        store.close()
+
+
+def _cmd_telegram_poll(args: argparse.Namespace) -> int:
+    data_dir = _resolve_data_dir(args.data_dir)
+    redactor, store, outbox, gw, meta = _build_telegram_env_context(data_dir)
+    try:
+        if not meta["bot_token"] or meta["bot_token"].startswith("<"):
+            raise ValueError("TELEGRAM_BOT_TOKEN is not configured in .env or environment")
+        offset = 0
+        cycles = 0
+        max_cycles = int(args.max_cycles)
+        while max_cycles <= 0 or cycles < max_cycles:
+            cycles += 1
+            offset, _ = gw.poll_updates_once(
+                meta["bot_token"],
+                offset=offset,
+                timeout_sec=int(args.timeout_sec),
+                token_rotation_confirmed=bool(meta["token_rotated"]),
+            )
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        outbox.close()
         store.close()
 
 
@@ -656,6 +825,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_op.add_argument("--chat-id", type=int, required=True)
     p_op.add_argument("--role", choices=["VIEWER", "OPERATOR", "ADMIN"], default="ADMIN")
 
+    p_tchk = sub.add_parser("telegram-check", help="Verify .env Telegram config, RBAC /status response, and live getMe")
+    p_tchk.add_argument("--offline", action="store_true", help="Skip live api.telegram.org HTTP call")
+    p_tchk.add_argument("--send-status-ping", action="store_true", help="Send live /status readiness card to configured chats")
+
+    p_tpoll = sub.add_parser("telegram-poll", help="Run live Telegram Bot API long-polling daemon for /status & controls")
+    p_tpoll.add_argument("--timeout-sec", type=int, default=15)
+    p_tpoll.add_argument("--max-cycles", type=int, default=0, help="0 = run continuously until Ctrl+C")
+
     sub.add_parser("status", help="Display sanitized fleet status, GE PnL, and safe slot capacity")
 
     p_stag = sub.add_parser("plan-stagger", help="Generate >=90s staggered cold-start schedule")
@@ -710,8 +887,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.data_dir:
+        alt_env = Path(args.data_dir).resolve().parent / ".env"
+        if alt_env.is_file():
+            load_dotenv(alt_env)
     cmd = args.subcommand
     if cmd == "doctor":
         return _cmd_doctor(args)
@@ -721,6 +903,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_ingest(args)
     if cmd == "grant-operator":
         return _cmd_grant_operator(args)
+    if cmd == "telegram-check":
+        return _cmd_telegram_check(args)
+    if cmd == "telegram-poll":
+        return _cmd_telegram_poll(args)
     if cmd == "status":
         return _cmd_status(args)
     if cmd == "plan-stagger":

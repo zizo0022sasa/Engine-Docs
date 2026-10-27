@@ -45,22 +45,58 @@ REGION_CANONICAL: dict[str, str] = {
 }
 
 
+def load_dotenv(dotenv_path: str | Path = ".env", *, override: bool = False) -> dict[str, str]:
+    """Stdlib `.env` file parser loading KEY=VALUE pairs without third-party dependencies."""
+    p = Path(dotenv_path)
+    if not p.is_file():
+        return {}
+    loaded: dict[str, str] = {}
+    for raw_line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if not key:
+            continue
+        loaded[key] = val
+        if override or key not in os.environ:
+            os.environ[key] = val
+    return loaded
+
+
 def normalize_proxy_uri(raw_proxy: str) -> str:
-    """Normalize flexible proxy inputs into `socks5://[user:pass@]host:port` for the local sidecar."""
+    """Normalize flexible proxy inputs into `socks5://[user:pass@]host:port` (or `direct://local`)."""
     val = raw_proxy.strip()
     if not val:
         raise ValueError("Empty proxy specification")
+    if val.upper() in ("DIRECT", "LOCAL", "NONE"):
+        return "direct://local"
     if "://" not in val:
-        # Support ip:port or host:port:user:pass shorthand
-        parts = val.split(":")
-        if len(parts) == 2:
-            val = f"socks5://{parts[0]}:{parts[1]}"
-        elif len(parts) == 4:
-            host, port, user, pw = parts
-            val = f"socks5://{user}:{pw}@{host}:{port}"
+        if "@" in val:
+            val = f"socks5://{val}"
         else:
-            raise ValueError(f"Unrecognized proxy format (expected socks5://... or host:port): {raw_proxy[:12]}...")
+            # Support ip:port or host:port:user:pass shorthand
+            parts = val.split(":")
+            if len(parts) == 2:
+                val = f"socks5://{parts[0]}:{parts[1]}"
+            elif len(parts) == 4:
+                host, port, user, pw = parts
+                val = f"socks5://{user}:{pw}@{host}:{port}"
+            else:
+                raise ValueError(
+                    f"Unrecognized proxy format (expected socks5://..., host:port, host:port:user:pass, or DIRECT): {raw_proxy[:12]}..."
+                )
     parsed = urlparse(val)
+    if parsed.scheme.lower() == "direct":
+        return "direct://local"
     if parsed.scheme.lower() not in ("socks5", "socks5h", "socks"):
         raise ValueError(
             f"Upstream proxy must support SOCKS5 for remote DNS & UDP/TCP isolation (got scheme={parsed.scheme!r})"
@@ -134,6 +170,19 @@ class LocalSecretVault:
             raise KeyError(f"Secret reference not found in vault: {vault_ref}")
         return dict(self._data[vault_ref])
 
+    def find_existing_account_by_identity(self, *, email: str | None = None, jx_character_id: str | None = None) -> str | None:
+        """Return existing `account_id` if credential identity is already vaulted (idempotent ingest)."""
+        norm_email = email.strip().lower() if email else None
+        norm_char = jx_character_id.strip() if jx_character_id else None
+        for ref, payload in self._data.items():
+            if not ref.startswith("vault://accounts/"):
+                continue
+            if norm_email and str(payload.get("email", "")).strip().lower() == norm_email:
+                return str(payload.get("account_id", ""))
+            if norm_char and str(payload.get("jx_character_id", "")).strip() == norm_char:
+                return str(payload.get("account_id", ""))
+        return None
+
 
 @dataclass(frozen=True)
 class IngestedAccountSummary:
@@ -178,6 +227,15 @@ def ingest_pipe_lines(
         canonical_region = REGION_CANONICAL[reg_key]
         tz_name = REGION_TO_TIMEZONE[reg_key]
         normalized_proxy = normalize_proxy_uri(raw_proxy)
+
+        # Idempotent skip if exact same credential is already vaulted
+        existing_acc = (
+            vault.find_existing_account_by_identity(email=field1)
+            if "@" in field1
+            else vault.find_existing_account_by_identity(jx_character_id=field2)
+        )
+        if existing_acc:
+            continue
 
         while True:
             account_id = f"acc_{idx:02d}"

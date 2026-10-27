@@ -6,9 +6,9 @@
 
 ## 1. الحالة الراهنة للمشروع (`Current Snapshot`)
 
-* **المرحلة الحالية:** **اكتمال النواة التحتية المعتمدة ميدانياً على المنفذ `8081` (`PR-12.1` / `783a735`) + اكتمال منظومة السكربتات ووحدات المهام المعزولة الكاملة (`Stage 0 .. Stage 3`) في `osrs_ee/bots/` (`PR-13`)**.
+* **المرحلة الحالية:** **اكتمال النواة السلكية (`PR-12.1` / `783a735`) + منظومة البوتات المعزولة الكاملة (`PR-13` / `c664c81`) + ربط وتجهيز بوابة التليجرام الحية (`@orangeconnebot`) ومسار استيراد الحسابات المشفر (`PR-14`)**.
 * **نتيجة فحص الأسرار (`Secret Scan`):** `[SECRET_SCAN_OK] Zero secret patterns detected under .`
-* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`50 passed` (0 failed)** عبر 14 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T44`.
+* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`52 passed` (0 failed)** عبر 15 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T46`.
 * **التمييز المعرفي الدقيق (`Epistemic Status`):**
   * **`LIVE_WIRE_VERIFIED` (على عميل `microbot-2.6.34.jar` الحي — `127.0.0.1:8081` عند الكوميت `390419c`):**
     1. استجابة `GET /state` الافتراضية في `<10ms` بدون أي خطأ `404` (`{'reachable': True, 'logged_in': False, 'login_state': 'LOGIN_SCREEN'}`).
@@ -37,7 +37,8 @@
 | **`PR-11`** | `b06ec3c` | بناء واجهة التشغيل الموحدة `osrs_ee/cli.py` + `.env.example` + اختبار التكامل الشامل `test_pr11_cli_e2e.py` + الدليل الكامل `كيفيه_الاستخدام_من_الالف_للياء.md`. | `38 passed` (`T01..T32`) |
 | **`PR-12`** | `ade6240` | المعالجة الجذرية للعيوب الميدانية الأربعة (`AUD-36..39` / `ADR-009..012`): `ReactiveSafetyWatchdog` بدون انتظار ساكن، `ConstrainedWaypointGraph` لممرات المستوى 3 الآمنة، `SessionLifecycleManager` بالإنعاش الذاتي، وفصل `ExecutionEngineKernel` عن `osrs_ee/bots/`. | `42 passed` (`T01..T36`) |
 | **`PR-12.1`** | `390419c` / `783a735` | إغلاق فجوات التوافق السلكي الثلاث مع عميل Microbot الحي (`AUD-40..42` / `ADR-013`): تطبيع نقاط الحياة ضد `None` (`hitpoints/maxHitpoints` + `/skills?name=Hitpoints`)، دعم `WIDGET_CLICK -> POST /widgets/click`، واعتماد `status_endpoint="/state"` افتراضياً مع سقوط تلقائي ذكي لـ `/status` — **ومعتمد بشهادة فحص سلكي حي على `microbot-2.6.34.jar` (`127.0.0.1:8081`)**. | `45 passed` (`T01..T39`) |
-| **`PR-13`** | *(منظومة البوتات والمهام الكاملة)* | بناء واستكمال الوحدات السبع المعتمدة في `osrs_ee/bots/` (`StrongholdTaskModule` 4 طوابق كاملة + 39 سؤالاً + `270:15` + إيداع البنك، `TutorialIslandTaskModule`، `TradeUnlockQuestsTaskModule` 12 QP، `TotalLevel100TaskModule`، `SkillingGathererTaskModule` لـ 3 دورات، و`BotModuleRegistry`) مع أوامر `live-probe` و`attach-bot`. | **`50 passed`** (`T01..T44`) |
+| **`PR-13`** | `c664c81` | بناء واستكمال الوحدات السبع المعتمدة في `osrs_ee/bots/` (`StrongholdTaskModule` 4 طوابق كاملة + 39 سؤالاً + `270:15` + إيداع البنك، `TutorialIslandTaskModule`، `TradeUnlockQuestsTaskModule` 12 QP، `TotalLevel100TaskModule`، `SkillingGathererTaskModule` لـ 3 دورات، و`BotModuleRegistry`) مع أوامر `live-probe` و`attach-bot`. | `50 passed` (`T01..T44`) |
+| **`PR-14`** | *(تجهيز الأسطول وبوابة التليجرام الحية)* | محمل `.env` قياسي، تفعيل فحص واستطلاع التليجرام الحي (`telegram-check` و`telegram-poll` على `@orangeconnebot` مع فلتر `ALLOWED_CHAT_IDS` ودعم `/status@bot`)، وتحصين `ingest --file accounts.txt` ضد التكرار. | **`52 passed`** (`T01..T46`) |
 
 ---
 
