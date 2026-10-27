@@ -27,6 +27,7 @@ ALLOWED_MVP_COMMANDS: frozenset[str] = frozenset(
         "BANK_DEPOSIT_EQUIPMENT",
         "BANK_WITHDRAW_ITEM",
         "INTERACT_OBJECT",
+        "INTERACT_NPC",
         "WIDGET_CLICK",
         "DIALOGUE_SELECT",
         "DIALOGUE_CONTINUE",

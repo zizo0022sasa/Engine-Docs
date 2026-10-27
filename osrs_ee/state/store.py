@@ -344,6 +344,7 @@ class StateStore:
         task_id: str,
         now_utc: datetime | None = None,
         session_kind: str = "WORK",  # WORK | DISCOVERY | RECONCILE
+        bypass_circadian: bool = False,
     ) -> dict[str, Any]:
         now_utc = now_utc or datetime.now(timezone.utc)
         with self._lock:
@@ -366,7 +367,9 @@ class StateStore:
                         raise StaleContextError(
                             f"Cannot acquire WORK lease for {account_id} in state {current_status.value}"
                         )
-                    if is_in_circadian_sleep_window(now_utc, acc["timezone"], acc["persona_seed"]):
+                    if not bypass_circadian and is_in_circadian_sleep_window(
+                        now_utc, acc["timezone"], acc["persona_seed"]
+                    ):
                         raise CircadianSleepActiveError(
                             f"Account {account_id} is inside its geo-aligned circadian sleep block"
                         )

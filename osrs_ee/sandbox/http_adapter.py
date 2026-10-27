@@ -285,6 +285,32 @@ class MicrobotHttpAdapter:
         with self._lock:
             self._cached_obs = None
 
+    def read_varbits(self, varbit_ids: tuple[int, ...] | list[int]) -> dict[int, int]:
+        """Query live `/varbits?id=<vid>` for Stronghold/Quest progress (graceful on 404)."""
+        out: dict[int, int] = {}
+        for vid in varbit_ids:
+            ivid = int(vid)
+            try:
+                res = self._request_json("GET", f"/varbits?id={ivid}")
+                if isinstance(res, dict) and isinstance(res.get("value"), int):
+                    out[ivid] = int(res["value"])
+            except EndpointNotFoundError:
+                break
+        return out
+
+    def read_varps(self, varp_ids: tuple[int, ...] | list[int]) -> dict[int, int]:
+        """Query live `/varps?id=<pid>` for Tutorial/Quest progress (graceful on 404)."""
+        out: dict[int, int] = {}
+        for pid in varp_ids:
+            ipid = int(pid)
+            try:
+                res = self._request_json("GET", f"/varps?id={ipid}")
+                if isinstance(res, dict) and isinstance(res.get("value"), int):
+                    out[ipid] = int(res["value"])
+            except EndpointNotFoundError:
+                break
+        return out
+
     def read_observation(self, *, monotonic_ms: int | None = None) -> dict[str, Any]:
         mono = monotonic_ms if monotonic_ms is not None else int(time.monotonic() * 1000)
         with self._lock:
@@ -488,6 +514,8 @@ class MicrobotHttpAdapter:
             return _normalize_command_response(self._request_json("POST", "/widgets/click", req_body))
         if command_type == "INTERACT_OBJECT":
             return _normalize_command_response(self._request_json("POST", "/objects/interact", payload))
+        if command_type == "INTERACT_NPC":
+            return _normalize_command_response(self._request_json("POST", "/npcs/interact", payload))
         if command_type == "DIALOGUE_SELECT":
             return _normalize_command_response(self._request_json("POST", "/dialogue/select", payload))
         if command_type == "DIALOGUE_CONTINUE":

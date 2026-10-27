@@ -52,6 +52,9 @@ class FakeGameAdapter:
         self.tutorial_varp_281 = tutorial_varp_281
         # Deliberately keep varbits namespace separate from varps (T10 proof!)
         self.varbits: dict[int, int] = {281: 0}
+        self.varps: dict[int, int] = {281: tutorial_varp_281}
+        self.dialogue_open: bool = False
+        self.last_dialogue_snapshot: dict[str, Any] = {}
         self.quest_points = quest_points
         self.total_level = total_level
         self.playtime_minutes = playtime_minutes
@@ -105,6 +108,19 @@ class FakeGameAdapter:
     def read_varbit(self, varbit_id: int) -> int:
         """Reading Varbit 281 returns 0 even when Tutorial Varp 281 == 1000 (AUD-17 / T10)."""
         return self.varbits.get(varbit_id, 0)
+
+    def read_varbits(self, varbit_ids: tuple[int, ...] | list[int]) -> dict[int, int]:
+        return {int(vid): int(self.varbits.get(int(vid), 0)) for vid in varbit_ids}
+
+    def read_varps(self, varp_ids: tuple[int, ...] | list[int]) -> dict[int, int]:
+        out: dict[int, int] = {}
+        for pid in varp_ids:
+            ipid = int(pid)
+            if ipid == 281:
+                out[281] = int(self.tutorial_varp_281)
+            else:
+                out[ipid] = int(self.varps.get(ipid, 0))
+        return out
 
     def read_observation(self, *, monotonic_ms: int = 1000) -> dict[str, Any]:
         if not self.alive or self.transient_disconnect:
@@ -173,7 +189,7 @@ class FakeGameAdapter:
             "quest_points": {"value": self.quest_points, "quality": "KNOWN"},
             "total_level": {"value": self.total_level, "quality": "KNOWN"},
             "playtime_minutes": {"value": self.playtime_minutes, "quality": "KNOWN"},
-            "dialogue_open": False,
+            "dialogue_open": bool(self.dialogue_open),
             "bank": {
                 "is_open": self.bank_open,
                 "pin_prompt_open": self.bank_pin_prompt_open,
@@ -305,7 +321,7 @@ class FakeGameAdapter:
                     return {"ok": True}
             return {"ok": False, "reason": "food_not_in_inventory"}
 
-        if command_type in ("INTERACT_OBJECT", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
+        if command_type in ("INTERACT_OBJECT", "INTERACT_NPC", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
             return {"ok": True}
 
         if command_type == "WIDGET_CLICK":

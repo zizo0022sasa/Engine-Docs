@@ -61,6 +61,7 @@ class NavigationPlan:
 @dataclass
 class NavigationProgress:
     plan: NavigationPlan
+    target_signature: str = ""
     current_index: int = 0
     last_dispatched_index: int = -1
     last_observed_pos: WorldPoint | None = None
@@ -91,7 +92,18 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "LUMBRIDGE_CASTLE_COURTYARD": WorldPoint(3222, 3218, 0, "LUMBRIDGE_CASTLE_COURTYARD"),
     "AL_KHARID_TOLL_GATE": WorldPoint(3268, 3227, 0, "AL_KHARID_TOLL_GATE"),
     "AL_KHARID_NORTH_PASS": WorldPoint(3280, 3315, 0, "AL_KHARID_NORTH_PASS"),
+    "AL_KHARID_MINE": WorldPoint(3298, 3284, 0, "AL_KHARID_MINE"),
     "AL_KHARID_BANK": WorldPoint(3269, 3167, 0, "AL_KHARID_BANK"),
+    # Stage 0.2 & 0.3 Quest / Skilling Safe Surface Spurs
+    "VARROCK_SQUARE": WorldPoint(3211, 3422, 0, "VARROCK_SQUARE"),
+    "VARROCK_JULIET_STAIRS": WorldPoint(3157, 3435, 0, "VARROCK_JULIET_STAIRS"),
+    "VARROCK_APOTHECARY": WorldPoint(3195, 3405, 0, "VARROCK_APOTHECARY"),
+    "VARROCK_EAST_CHURCH": WorldPoint(3254, 3483, 0, "VARROCK_EAST_CHURCH"),
+    "LUMBRIDGE_KITCHEN": WorldPoint(3206, 3214, 0, "LUMBRIDGE_KITCHEN"),
+    "LUMBRIDGE_WEST_TREES": WorldPoint(3190, 3245, 0, "LUMBRIDGE_WEST_TREES"),
+    "LUMBRIDGE_SHEEP_FARM": WorldPoint(3190, 3273, 0, "LUMBRIDGE_SHEEP_FARM"),
+    "LUMBRIDGE_SWAMP_FISHING": WorldPoint(3243, 3152, 0, "LUMBRIDGE_SWAMP_FISHING"),
+    "GOBLIN_VILLAGE": WorldPoint(2958, 3512, 0, "GOBLIN_VILLAGE"),
 }
 
 
@@ -226,6 +238,67 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "src": "AL_KHARID_NORTH_PASS",
             "dst": "AL_KHARID_BANK",
             "cost_tiles": 148.0,
+        },
+        {
+            "edge_id": "safe_alkharid_bank_to_mine",
+            "src": "AL_KHARID_BANK",
+            "dst": "AL_KHARID_MINE",
+            "cost_tiles": 120.0,
+        },
+        # --- STAGE 0.2 & 0.3 SAFE QUEST / SKILLING LEAF SPURS ---
+        {
+            "edge_id": "safe_varrock_west_to_juliet_stairs",
+            "src": "VARROCK_WEST_BANK",
+            "dst": "VARROCK_JULIET_STAIRS",
+            "cost_tiles": 28.0,
+        },
+        {
+            "edge_id": "safe_varrock_west_to_square",
+            "src": "VARROCK_WEST_BANK",
+            "dst": "VARROCK_SQUARE",
+            "cost_tiles": 30.0,
+        },
+        {
+            "edge_id": "safe_varrock_square_to_apothecary",
+            "src": "VARROCK_SQUARE",
+            "dst": "VARROCK_APOTHECARY",
+            "cost_tiles": 24.0,
+        },
+        {
+            "edge_id": "safe_varrock_square_to_east_church",
+            "src": "VARROCK_SQUARE",
+            "dst": "VARROCK_EAST_CHURCH",
+            "cost_tiles": 74.0,
+        },
+        {
+            "edge_id": "safe_lumbridge_courtyard_to_kitchen",
+            "src": "LUMBRIDGE_CASTLE_COURTYARD",
+            "dst": "LUMBRIDGE_KITCHEN",
+            "cost_tiles": 18.0,
+        },
+        {
+            "edge_id": "safe_lumbridge_courtyard_to_west_trees",
+            "src": "LUMBRIDGE_CASTLE_COURTYARD",
+            "dst": "LUMBRIDGE_WEST_TREES",
+            "cost_tiles": 42.0,
+        },
+        {
+            "edge_id": "safe_lumbridge_courtyard_to_sheep_farm",
+            "src": "LUMBRIDGE_CASTLE_COURTYARD",
+            "dst": "LUMBRIDGE_SHEEP_FARM",
+            "cost_tiles": 64.0,
+        },
+        {
+            "edge_id": "safe_lumbridge_courtyard_to_swamp_fishing",
+            "src": "LUMBRIDGE_CASTLE_COURTYARD",
+            "dst": "LUMBRIDGE_SWAMP_FISHING",
+            "cost_tiles": 70.0,
+        },
+        {
+            "edge_id": "safe_falador_east_to_goblin_village",
+            "src": "FALADOR_EAST_ROAD",
+            "dst": "GOBLIN_VILLAGE",
+            "cost_tiles": 158.0,
         },
     ]
 
@@ -396,6 +469,12 @@ class NavigationEngine:
         self._blacklisted_edges_by_account: dict[str, set[str]] = {}
         self._active_progress: dict[str, NavigationProgress] = {}
 
+    @staticmethod
+    def _dest_sig(destination: str | WorldPoint) -> str:
+        if isinstance(destination, str):
+            return f"NODE:{destination}"
+        return f"WP:{destination.x}:{destination.y}:{destination.plane}"
+
     def start_route(
         self,
         *,
@@ -403,6 +482,34 @@ class NavigationEngine:
         destination: str | WorldPoint,
         capabilities: AccountCapabilitiesContext,
     ) -> NavigationPlan:
+        sig = self._dest_sig(destination)
+        # Direct local micro-route for underground dungeons (y >= 5000), upper floors (plane != 0),
+        # or short local room steps so dungeon coordinates NEVER snap to overworld surface road nodes!
+        if isinstance(destination, WorldPoint) and isinstance(origin, WorldPoint):
+            is_dungeon_or_upper = (
+                origin.y >= 5000
+                or destination.y >= 5000
+                or origin.plane != 0
+                or destination.plane != 0
+                or origin.chebyshev_distance(destination) <= 20
+            )
+            if is_dungeon_or_upper:
+                plan = NavigationPlan(
+                    origin_node=origin.label or "LOCAL_ORIGIN",
+                    destination_node=destination.label or "LOCAL_TARGET",
+                    waypoints=(origin, destination),
+                    traversed_edges=(),
+                    pruned_edges={},
+                    walker_flags=capabilities.to_walker_constraint_flags(),
+                    total_cost_tiles=float(origin.chebyshev_distance(destination)),
+                )
+                self._active_progress[capabilities.account_id] = NavigationProgress(
+                    plan=plan,
+                    target_signature=sig,
+                    current_index=1,
+                )
+                return plan
+
         blocked = frozenset(self._blacklisted_edges_by_account.get(capabilities.account_id, set()))
         plan = self.graph.plan_safe_route(
             origin=origin,
@@ -414,6 +521,7 @@ class NavigationEngine:
         start_idx = 1 if len(plan.waypoints) > 1 else 0
         self._active_progress[capabilities.account_id] = NavigationProgress(
             plan=plan,
+            target_signature=sig,
             current_index=start_idx,
         )
         return plan
@@ -430,12 +538,14 @@ class NavigationEngine:
 
         - Streams the next waypoint smoothly BEFORE the character stops (`dist <= lookahead_tiles`),
           preventing stutter-stepping on dangerous tiles!
+        - Automatically replans when `destination` changes across multi-leg missions!
         - If `tick_advanced` is True for `>= 3` consecutive ticks with zero movement toward the active
           waypoint (e.g. stuck on an unmapped wall/obstacle), blacklists the jammed edge and reroutes!
         - Returns a `/walk` payload dict ONLY when a new waypoint needs to be dispatched, else `None`.
         """
+        sig = self._dest_sig(destination)
         prog = self._active_progress.get(capabilities.account_id)
-        if prog is None:
+        if prog is None or prog.completed or (prog.target_signature and prog.target_signature != sig):
             self.start_route(origin=current_pos, destination=destination, capabilities=capabilities)
             prog = self._active_progress[capabilities.account_id]
 

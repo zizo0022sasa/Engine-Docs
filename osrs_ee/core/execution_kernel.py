@@ -102,6 +102,7 @@ class ExecutionEngineKernel:
         dialogue_question: str = "",
         dialogue_options: tuple[str, ...] = (),
         varbits: Mapping[int, int] | None = None,
+        varps: Mapping[int, int] | None = None,
     ) -> KernelTickResult:
         """Execute a single non-blocking engine cycle (ZERO `time.sleep()`)."""
         dispatched: list[str] = []
@@ -239,10 +240,26 @@ class ExecutionEngineKernel:
             )
             dispatched.append("SET_RUN_MODE")
 
-        # 4. Evaluate pure pluggable TaskModule (enriching dialogue from live adapter if available)
+        # 4. Evaluate pure pluggable TaskModule (enriching dialogue, varbits, varps & metrics from live adapter)
         live_dlg = getattr(self.gate.adapter, "last_dialogue_snapshot", {}) or {}
         eff_q = dialogue_question or str(live_dlg.get("question") or live_dlg.get("dialogueText") or "")
         eff_opts = dialogue_options or tuple(live_dlg.get("options") or ())
+
+        resolved_varbits: dict[int, int] = {}
+        if task_module.watched_varbits and hasattr(self.gate.adapter, "read_varbits"):
+            resolved_varbits.update(self.gate.adapter.read_varbits(task_module.watched_varbits))
+        if varbits:
+            resolved_varbits.update({int(k): int(v) for k, v in varbits.items()})
+
+        resolved_varps: dict[int, int] = {}
+        if task_module.watched_varps and hasattr(self.gate.adapter, "read_varps"):
+            resolved_varps.update(self.gate.adapter.read_varps(task_module.watched_varps))
+        if varps:
+            resolved_varps.update({int(k): int(v) for k, v in varps.items()})
+
+        bank_obs = obs.get("bank") or {}
+        bank_is_open = bool(bank_obs.get("is_open", False))
+        bank_items_tuple = tuple(bank_obs.get("items") or ())
 
         ctx = TickContext(
             game_tick=curr_tick,
@@ -252,8 +269,14 @@ class ExecutionEngineKernel:
             dialogue_open=bool(obs["dialogue_open"]),
             dialogue_question=eff_q,
             dialogue_options=eff_opts,
-            varbits=varbits or {},
-            tutorial_varp_281=int(obs["tutorial_varp_281"]["value"] or 0),
+            varbits=resolved_varbits,
+            varps=resolved_varps,
+            tutorial_varp_281=_coalesce_int((obs.get("tutorial_varp_281") or {}).get("value"), 0),
+            quest_points=_coalesce_int((obs.get("quest_points") or {}).get("value"), self.capabilities.quest_points),
+            total_level=_coalesce_int((obs.get("total_level") or {}).get("value"), 32),
+            playtime_minutes=_coalesce_int((obs.get("playtime_minutes") or {}).get("value"), 0),
+            bank_is_open=bank_is_open,
+            bank_items=bank_items_tuple,
             in_danger=safety.in_danger,
         )
         directive = task_module.evaluate_tick(ctx)
@@ -292,12 +315,36 @@ class ExecutionEngineKernel:
             )
             dispatched.append("INTERACT_OBJECT")
 
+        elif directive.directive_type == DirectiveType.INTERACT_NPC:
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent("INTERACT_NPC", dict(directive.payload)),
+                postcondition_checker=lambda _post: True,
+            )
+            dispatched.append("INTERACT_NPC")
+
         elif directive.directive_type == DirectiveType.CLICK_WIDGET:
             self.gate.dispatch_verified_command(
                 intent=self._make_intent("WIDGET_CLICK", dict(directive.payload)),
                 postcondition_checker=lambda _post: True,
             )
             dispatched.append("WIDGET_CLICK")
+
+        elif directive.directive_type == DirectiveType.BANK_TURNAROUND:
+            turn_outcome = self._execute_nonblocking_bank_turnaround(
+                obs=obs,
+                inv_items=inv_items,
+                payload=dict(directive.payload),
+                dispatched=dispatched,
+            )
+            if turn_outcome is not None:
+                return KernelTickResult(
+                    lifecycle_state=live_lc_state,
+                    safety_verdict=safety.verdict,
+                    task_directive=directive,
+                    dispatched_commands=tuple(dispatched),
+                    halted=True,
+                    detail=turn_outcome,
+                )
 
         elif directive.directive_type == DirectiveType.SELECT_DIALOGUE:
             self.gate.dispatch_verified_command(
@@ -338,3 +385,121 @@ class ExecutionEngineKernel:
             halted=(directive.directive_type == DirectiveType.COMPLETE_TASK),
             detail=directive.reason or safety.detail,
         )
+
+    def _execute_nonblocking_bank_turnaround(
+        self,
+        *,
+        obs: dict[str, Any],
+        inv_items: list[dict[str, Any]],
+        payload: dict[str, Any],
+        dispatched: list[str],
+    ) -> str | None:
+        """Execute one non-blocking step of a bank turnaround per tick (ZERO `time.sleep`).
+
+        Returns an escalation reason string ONLY if halted (`BANK_PIN_REQUIRED` or `INSUFFICIENT_RESOURCES`),
+        otherwise returns `None` after advancing one verified bank step.
+        """
+        bank = obs.get("bank") or {}
+        if not bank.get("is_open", False):
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent("BANK_OPEN", {}),
+                postcondition_checker=lambda post: bool(post["bank"]["is_open"]),
+            )
+            dispatched.append("BANK_OPEN")
+            return None
+
+        if bank.get("pin_prompt_open", False):
+            self.gate.store.close_session(
+                account_id=self.account_id,
+                session_id=self.session_id,
+                lease_id=self.lease_id,
+                session_epoch=self.session_epoch,
+                target_status=AccountStatus.BLOCKED,
+                reason_code=ReasonCode.BANK_PIN_REQUIRED,
+            )
+            return "BANK_PIN_REQUIRED"
+
+        withdraw_specs: list[dict[str, Any]] = list(payload.get("withdraw") or [])
+        required_ids = {int(w["item_id"]) for w in withdraw_specs if "item_id" in w}
+        required_names = {str(w["name"]).strip().casefold() for w in withdraw_specs if "name" in w}
+
+        # Deposit inventory if requested and non-required items are still in inventory
+        if payload.get("deposit_inventory", True):
+            has_depositable = any(
+                int(it.get("item_id", -1)) not in required_ids
+                and str(it.get("name", "")).strip().casefold() not in required_names
+                for it in inv_items
+            )
+            if has_depositable:
+                self.gate.dispatch_verified_command(
+                    intent=self._make_intent(
+                        "BANK_DEPOSIT_INVENTORY",
+                        {},
+                        idempotency_class="IDEMPOTENT",
+                    ),
+                    postcondition_checker=lambda post: len(post["inventory"]["items"] or []) == 0,
+                )
+                dispatched.append("BANK_DEPOSIT_INVENTORY")
+                return None
+
+        # Withdraw next missing required item (1 item per tick, verified postcondition!)
+        for req in withdraw_specs:
+            req_qty = int(req.get("quantity", 1))
+            req_noted = bool(req.get("noted", False))
+            req_id = int(req["item_id"]) if "item_id" in req else None
+            req_name = str(req["name"]).strip() if "name" in req else None
+
+            inv_qty = sum(
+                int(it.get("quantity", 0))
+                for it in inv_items
+                if bool(it.get("noted", False)) == req_noted
+                and (
+                    (req_id is not None and int(it.get("item_id", -1)) == req_id)
+                    or (req_name is not None and str(it.get("name", "")).strip().casefold() == req_name.casefold())
+                )
+            )
+            if inv_qty < req_qty:
+                needed = req_qty - inv_qty
+                w_payload: dict[str, Any] = {"quantity": needed, "noted": req_noted}
+                if req_id is not None:
+                    w_payload["item_id"] = req_id
+                if req_name is not None:
+                    w_payload["name"] = req_name
+
+                res = self.gate.dispatch_verified_command(
+                    intent=self._make_intent(
+                        "BANK_WITHDRAW_ITEM",
+                        w_payload,
+                        idempotency_class="NON_IDEMPOTENT",
+                    ),
+                    postcondition_checker=lambda post, rid=req_id, rnm=req_name, tgt=req_qty, ntd=req_noted: sum(
+                        int(i.get("quantity", 0))
+                        for i in (post["inventory"]["items"] or [])
+                        if bool(i.get("noted", False)) == ntd
+                        and (
+                            (rid is not None and int(i.get("item_id", -1)) == rid)
+                            or (rnm is not None and str(i.get("name", "")).strip().casefold() == rnm.casefold())
+                        )
+                    ) >= tgt,
+                )
+                dispatched.append("BANK_WITHDRAW_ITEM")
+                if res["effect_status"] != "VERIFIED":
+                    self.gate.store.close_session(
+                        account_id=self.account_id,
+                        session_id=self.session_id,
+                        lease_id=self.lease_id,
+                        session_epoch=self.session_epoch,
+                        target_status=AccountStatus.BLOCKED,
+                        reason_code=ReasonCode.INSUFFICIENT_RESOURCES,
+                    )
+                    return f"INSUFFICIENT_RESOURCES:{req_name or req_id}"
+                return None
+
+        # All deposits & withdrawals satisfied -> close bank cleanly!
+        if payload.get("close_when_done", True):
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent("BANK_CLOSE", {}),
+                postcondition_checker=lambda post: not bool(post["bank"]["is_open"]),
+            )
+            dispatched.append("BANK_CLOSE")
+        return None

@@ -21,11 +21,12 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from osrs_ee.bots import SkillingGathererTaskModule, StrongholdTaskModule, TaskModule
+from osrs_ee.bots import BotModuleRegistry, TaskModule
 from osrs_ee.core import ExecutionEngineKernel
 from osrs_ee.economy import GEOrderLedger
 from osrs_ee.navigation import AccountCapabilitiesContext, ConstrainedWaypointGraph
@@ -211,9 +212,170 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _resolve_task_module(recipe_id: str) -> TaskModule:
-    if recipe_id == "stage2_stronghold_10k":
-        return StrongholdTaskModule()
-    return SkillingGathererTaskModule(recipe_id=recipe_id)
+    return BotModuleRegistry().create(recipe_id)
+
+
+def _read_agent_token_file(token_file: str | None) -> str:
+    default_path = Path(os.environ.get("OSRS_AGENT_TOKEN_PATH", str(Path.home() / ".runelite" / ".agent-token")))
+    path = Path(token_file).expanduser().resolve() if token_file else default_path
+    if not path.exists():
+        raise FileNotFoundError(f"Agent token file not found at {path}; start Microbot AgentServer first")
+    token = path.read_text(encoding="utf-8").strip()
+    if len(token) < 16:
+        raise ValueError(f"Token in {path} is shorter than required 16 characters")
+    return token
+
+
+def _cmd_live_probe(args: argparse.Namespace) -> int:
+    redactor = Redactor()
+    token = _read_agent_token_file(args.token_file)
+    redactor.register_secret(token)
+    adapter = MicrobotHttpAdapter(
+        account_id=args.account_id,
+        session_id="live_probe_01",
+        session_epoch=1,
+        port=int(args.port),
+        agent_token=token,
+        coalesce_window_ms=150,
+    )
+    try:
+        probe = adapter.probe_session_state()
+        obs = adapter.read_observation()
+        summary = {
+            "ok": True,
+            "port": adapter.port,
+            "active_status_endpoint": adapter._active_status_endpoint,
+            "reachable": probe["reachable"],
+            "login_state": obs["login_state"],
+            "game_tick": obs["game_tick"],
+            "position": obs["position"],
+            "vitals": obs.get("vitals"),
+            "tcp_connect_count": adapter.tcp_connect_count,
+            "http_request_count": adapter.http_request_count,
+        }
+        print(redactor.redact_text(json.dumps(summary, indent=2, ensure_ascii=False)))
+        return 0
+    finally:
+        adapter.kill_process_tree()
+
+
+def _cmd_attach_bot(args: argparse.Namespace) -> int:
+    data_dir = _resolve_data_dir(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    redactor = Redactor()
+    token = _read_agent_token_file(args.token_file)
+    redactor.register_secret(token)
+
+    store = StateStore(
+        data_dir / "state.db",
+        snapshot_path=data_dir / "state_snapshot.json",
+        redactor=redactor,
+    )
+    try:
+        try:
+            acc = store.get_account(args.account_id)
+        except KeyError:
+            store.register_account(
+                account_id=args.account_id,
+                auth_mode="LEGACY_CREDENTIALS",
+                credential_ref=f"vault://accounts/{args.account_id}/auth",
+                proxy_ref="vault://proxies/local_attached",
+                region="EG",
+                timezone_name="Africa/Cairo",
+                persona_seed=101,
+                initial_status=AccountStatus.READY,
+            )
+            acc = store.get_account(args.account_id)
+
+        from datetime import datetime, timezone
+
+        if AccountStatus(acc["status"]) == AccountStatus.RESTING:
+            store.transition_resting_to_ready_if_due(args.account_id, datetime.now(timezone.utc))
+            acc = store.get_account(args.account_id)
+
+        lease = store.acquire_session_lease(
+            account_id=args.account_id,
+            slot_id=0,
+            task_id=args.recipe_id,
+            bypass_circadian=True,
+        )
+        adapter = MicrobotHttpAdapter(
+            account_id=args.account_id,
+            session_id=lease["session_id"],
+            session_epoch=lease["session_epoch"],
+            port=int(args.port),
+            agent_token=token,
+            coalesce_window_ms=180,
+        )
+        gate = GameAdapterGate(store, adapter)  # type: ignore[arg-type]
+        gate.bind_to_lease(
+            account_id=args.account_id,
+            session_id=lease["session_id"],
+            lease_id=lease["lease_id"],
+            session_epoch=lease["session_epoch"],
+        )
+        caps = AccountCapabilitiesContext(
+            account_id=args.account_id,
+            skills={"agility": int(args.agility), "hitpoints": 10},
+            combat_level=int(args.combat_level),
+            quest_points=int(acc["quest_points"] or 0),
+            is_member=bool(args.member),
+        )
+        kernel = ExecutionEngineKernel(
+            gate=gate,
+            account_id=args.account_id,
+            session_id=lease["session_id"],
+            lease_id=lease["lease_id"],
+            session_epoch=lease["session_epoch"],
+            capabilities=caps,
+        )
+        task_mod = _resolve_task_module(args.recipe_id)
+        stop_event = threading.Event()
+        max_ticks = max(1, int(args.max_ticks))
+        ticks_run = 0
+        last_res = None
+
+        try:
+            while ticks_run < max_ticks and not stop_event.is_set():
+                ticks_run += 1
+                t0 = time.monotonic()
+                last_res = kernel.step_tick(task_mod, now_monotonic=t0)
+                if last_res.halted:
+                    break
+                if args.tick_interval_sec > 0:
+                    rem = max(0.01, float(args.tick_interval_sec) - (time.monotonic() - t0))
+                    stop_event.wait(timeout=rem)
+        finally:
+            adapter.kill_process_tree()
+            cur_acc = store.get_account(args.account_id)
+            if AccountStatus(cur_acc["status"]) in (
+                AccountStatus.RUNNING,
+                AccountStatus.STARTING,
+                AccountStatus.LEASED,
+            ):
+                store.close_session(
+                    account_id=args.account_id,
+                    session_id=lease["session_id"],
+                    lease_id=lease["lease_id"],
+                    session_epoch=lease["session_epoch"],
+                    target_status=AccountStatus.RESTING,
+                    cooldown_until=datetime.now(timezone.utc),
+                )
+            store.export_snapshot()
+
+        out = {
+            "ok": True,
+            "recipe_id": task_mod.module_id,
+            "ticks_executed": ticks_run,
+            "halted": bool(last_res.halted) if last_res else False,
+            "final_lifecycle_state": str(last_res.lifecycle_state) if last_res else "UNKNOWN",
+            "final_directive": str(last_res.task_directive.directive_type) if (last_res and last_res.task_directive) else None,
+            "detail": last_res.detail if last_res else "",
+        }
+        print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
+        return 0
+    finally:
+        store.close()
 
 
 def _cmd_plan_route(args: argparse.Namespace) -> int:
@@ -421,8 +583,8 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
             _ = supervisor.attach_session(lease=lease, gate=gate)
             caps = AccountCapabilitiesContext(
                 account_id=args.account_id,
-                combat_level=max(3, int(acc["total_level"]) // 10),
-                quest_points=int(acc["quest_points"]),
+                combat_level=max(3, int(acc["total_level"] or 32) // 10),
+                quest_points=int(acc["quest_points"] or 0),
                 is_member=False,
             )
             kernel = ExecutionEngineKernel(
@@ -516,6 +678,22 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(CuratedRecipeRegistry()._by_id.keys()),
     )
 
+    p_probe = sub.add_parser("live-probe", help="Run read-only Keep-Alive wire handshake against Microbot port 8081")
+    p_probe.add_argument("--port", type=int, default=8081)
+    p_probe.add_argument("--account-id", default="acc_live_01")
+    p_probe.add_argument("--token-file", default=None, help="Path to .agent-token (default: ~/.runelite/.agent-token)")
+
+    p_att = sub.add_parser("attach-bot", help="Attach a decoupled TaskModule bot to a running Microbot port 8081")
+    p_att.add_argument("--recipe-id", default="stage2_stronghold_10k", choices=list(BotModuleRegistry().list_registered_ids()))
+    p_att.add_argument("--port", type=int, default=8081)
+    p_att.add_argument("--account-id", default="acc_live_01")
+    p_att.add_argument("--token-file", default=None, help="Path to .agent-token (default: ~/.runelite/.agent-token)")
+    p_att.add_argument("--agility", type=int, default=1)
+    p_att.add_argument("--combat-level", type=int, default=3)
+    p_att.add_argument("--member", action="store_true")
+    p_att.add_argument("--max-ticks", type=int, default=600)
+    p_att.add_argument("--tick-interval-sec", type=float, default=0.6)
+
     for name in ("dry-run-slot", "launch-slot"):
         p_slot = sub.add_parser(name, help=f"{'Dry-run' if name == 'dry-run-slot' else 'Launch'} isolated JVM slot")
         p_slot.add_argument("--account-id", required=True)
@@ -551,6 +729,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_plan_route(args)
     if cmd == "simulate-pilot":
         return _cmd_simulate_pilot(args)
+    if cmd == "live-probe":
+        return _cmd_live_probe(args)
+    if cmd == "attach-bot":
+        return _cmd_attach_bot(args)
     if cmd == "dry-run-slot":
         return _cmd_dry_run_or_launch_slot(args, dry_run=True)
     if cmd == "launch-slot":

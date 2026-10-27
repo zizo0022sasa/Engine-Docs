@@ -86,6 +86,13 @@
   3. اعتماد `WIDGET_CLICK` كأمر معماري رسمي في المخططات و`GameAdapterGate` و`DirectiveType.CLICK_WIDGET` وتوجيهه إلى `POST /widgets/click` (`groupId+childId` أو `text`) مع تطبيع مفاتيح الاستجابة الحية (`ok / success / clicked / opened / closed`) ومواءمة `/bank/deposit` (`{"all": true}`) وبديل أيقونة الجري `(160, 27)`.
 * **السبب والثقة:** ضمان التشغيل الميداني المباشر مع عميل Microbot الفعلي على المنفذ `8081` من أول اتصال دون أخطاء `TypeError` أو `HTTP 404` أو رفض أوامر الواجهات. (الثقة: عالية جداً — محقق ضد كود `AgentServerPlugin` المصدري ومختبر بـ `T37, T38, T39`).
 
+### `ADR-014` — منظومة وحدات المهام المعزولة الكاملة (`Stage 0 .. Stage 3`) وسجل `BotModuleRegistry` الموحد
+* **الحالة:** `ACCEPTED` | **المصادر:** `مصفوفة_السكربتات_المفتوحة_وخريطة_المراحل.md` + `جدول_الخطوات_وبروتوكول_العمل_المشترك.md` + `ADR-006, ADR-012`
+* **القرار:**
+  1. تنفيذ كافة الوصفات السبع المعتمدة في `CURATED_RECIPES` كوحدات `TaskModule` نقية ومفصولة تماماً في `osrs_ee/bots/` بدون أي استيراد شبكي أو انتظار ساكن (`TutorialIslandTaskModule`, `TradeUnlockQuestsTaskModule`, `TotalLevel100TaskModule`, `StrongholdTaskModule` بـ 4 طوابق كاملة، و`SkillingGathererTaskModule` لقطع الخشب والصيد والتعدين).
+  2. توسيع `ExecutionEngineKernel` و`NavigationEngine` لدعم الملاحة المحلية المباشرة داخل الكهوف السفلية (`y >= 5000`) والطوابق العلوية (`plane != 0`)، ودعم دورة البنك غير المعطلة نبضةً بنبضة (`BANK_TURNAROUND`)، والقراءة التلقائية لـ `watched_varbits` و`watched_varps`، وأوامر `live-probe` و`attach-bot` في `CLI`.
+* **السبب والثقة:** تغطية دورة حياة الحساب كاملة من جزيرة التعليمات وفك قيود التجارة (`12 QP + 100 Total + 20h`) وحصن الأمان (`10k GP + Fancy Boots`) حتى مهام الجمع المستدامة فوق النواة المعتمدة ميدانياً. (الثقة: عالية جداً — مختبر بـ `T40..T44`).
+
 ---
 
 ## 2. القرارات المعلقة بانتظار المالك (`Pending Owner Decisions`)
