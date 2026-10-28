@@ -6,7 +6,7 @@
 
 ## 1. الحالة الراهنة للمشروع (`Current Snapshot`)
 
-* **المرحلة الحالية:** **اكتمال حزمة البنية التحتية والتعافي من الكوارث وإدارة الأسطول عبر التليجرام (`PR-16`: تحرير الجلسات اليتيمة الواعي بحيوية العمليات `owner_pid + heartbeat_at` ومصالحة `RECOVERY_REQUIRED -> RECONCILING -> READY` تلقائياً في `attach-bot` وأمر `reconcile` المستقل + تحصين مخرجات `CLI` على ويندوز ضد `UnicodeEncodeError: cp1252` + أوامر التليجرام المشفرة `/add_account` و`/accounts` و`/reconcile` مع المسح التلقائي للرسائل الحساسة `deleteMessage` وتوثيق دستور الاختبار الميداني `docs/FIELD_TESTING_PROTOCOL.md`)**.
+* **المرحلة الحالية:** **اكتمال حزمة البنية التحتية والتعافي من الكوارث وإدارة الأسطول عبر التليجرام (`PR-16`: تحرير الجلسات اليتيمة الواعي بحيوية العمليات `owner_pid + heartbeat_at` ومصالحة `RECOVERY_REQUIRED -> RECONCILING -> READY` تلقائياً في `attach-bot` وأمر `reconcile` المستقل + تحصين مخرجات `CLI` على ويندوز ضد `UnicodeEncodeError: cp1252` + أوامر التليجرام المشفرة `/add_account` و`/accounts` و`/reconcile` مع المسح التلقائي للرسائل الحساسة `deleteMessage` وتوثيق دستور الشريكين زيزو وبولا `docs/zizo_bolla_field_testing_protocol.md`)**.
 * **نتيجة فحص الأسرار (`Secret Scan`):** `[SECRET_SCAN_OK] Zero secret patterns detected under .`
 * **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`61 passed` (0 failed)** عبر 17 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T55`.
 * **التمييز المعرفي الدقيق (`Epistemic Status`):**
@@ -40,7 +40,7 @@
 | **`PR-14`** | `37072a3` / `7ed863c` / `a2709e2` | محمل `.env` قياسي، تفعيل `@orangeconnebot` الحي، دعم `DIRECT` في `LocalSocks5Sidecar`، بث سجلات النبضات الحية في `attach-bot`، وإثبات محاكاة الطوابق الأربعة في `simulate-pilot`. | `52 passed` (`T01..T46`) |
 | **`PR-15`** | `58adeb9` | تفعيل الجري الذاتي غير المتذبذب (`Varp 173` + `160:27`)، التجهيز التلقائي للطعام قبل المغامرة (`DRAYNOR_BANK` + سقوط تلقائي لصيد وطهي الجمبري عند خلو البنك + تطبيع `bank.items`)، العداد الرتيب الداخلي عند `game_tick is None`، وتوسيع مدى عبور بوابات الطابق الرابع إلى `chebyshev_distance <= 2` مع حسم معرف الباب الأمامي (`23728` مقابل `23727`) وفلتر `Widget 270`. | `56 passed` (`T01..T50`) |
 | **`PR-15.1`** | `85422c1` | ربط حافتي `safe_bridge_east_to_barbarian_river_fire` (`14.0`) و`safe_barbarian_river_fire_to_stronghold_entrance` (`26.0`)، ومنع تكرار `POST /walk` اللحظي عبر مهلة Debounce مقدارها `5` نبضات (`3.0s`) على السطح، واستئناف الطهي الذكي من الكوبري مباشرة وعبر رسائل ترقية مستوى الطبخ حتى اكتمال الشواء ودخول `20790`. | `57 passed` (`T01..T51`) |
-| **`PR-16`** | *(التعافي الذاتي من انقطاع الكهرباء + Windows UTF-8 + Telegram Ingest)* | تحرير الجلسات اليتيمة الواعي بـ `owner_pid` و`heartbeat_at` دون لمس السلوتات الحية، المصالحة الحية التلقائية داخل `attach-bot` وأمر `reconcile` المستقل (`RECOVERY_REQUIRED -> RECONCILING -> READY`)، تهيئة `UTF-8` و`_safe_print` ضد كراش `Windows CP1252`، ودعم `/add_account` و`/accounts` و`/reconcile` عبر التليجرام مع المسح التلقائي `deleteMessage` وتوثيق `FIELD_TESTING_PROTOCOL.md`. | **`61 passed`** (`T01..T55`) |
+| **`PR-16`** | `8eb3231` | تحرير الجلسات اليتيمة الواعي بـ `owner_pid` و`heartbeat_at` دون لمس السلوتات الحية، المصالحة الحية التلقائية داخل `attach-bot` وأمر `reconcile` المستقل (`RECOVERY_REQUIRED -> RECONCILING -> READY`)، تهيئة `UTF-8` و`_safe_print` ضد كراش `Windows CP1252`، ودعم `/add_account` و`/accounts` و`/reconcile` عبر التليجرام مع المسح التلقائي `deleteMessage` وتوثيق `docs/zizo_bolla_field_testing_protocol.md`. | **`61 passed`** (`T01..T55`) |
 
 ---
 
