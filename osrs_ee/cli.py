@@ -624,16 +624,64 @@ def _cmd_simulate_pilot(args: argparse.Namespace) -> int:
             )
 
         runner = SingleSlotPilotRunner(store=store)
+        stronghold_summary: dict[str, Any] | None = None
 
         def _make_fake(lease: dict[str, Any]) -> FakeGameAdapter:
+            nonlocal stronghold_summary
             fa = FakeGameAdapter(
                 account_id=acc_id,
                 session_id=lease["session_id"],
                 session_epoch=lease["session_epoch"],
+                tutorial_varp_281=1000,
+                skills={"hitpoints": 10, "agility": 1, "woodcutting": 35},
+                bank_items=[{"item_id": 1359, "name": "Rune axe", "quantity": 1, "noted": False}],
             )
-            fa.tutorial_varp_281 = 1000
-            fa.skills = {"woodcutting": 35}
-            fa.bank_items = {"Willow logs": 0, "Rune axe": 1}
+            if args.recipe_id == "stage2_stronghold_10k":
+                fa.position = {"x": 3164, "y": 3487, "plane": 0}
+                for vid in (2309, 2310, 2311, 2312):
+                    fa.varbits[vid] = 0
+                f1_d = [(1864, 5227), (1875, 5239), (1912, 5242), (1905, 5230)]
+                f2_d = [(2030, 5236), (2025, 5245), (2014, 5237), (2020, 5225)]
+                f3_d = [(2132, 5259), (2132, 5265), (2140, 5280)]
+                f4_d = [(2359, 5233), (2345, 5238), (2341, 5224), (2343, 5218)]
+                d_idx = {"Gate of War": 0, "Rickety door": 0, "Oozing barrier": 0, "Portal of Death": 0}
+                orig_exec = fa.execute_raw_command
+
+                def _sim_sh(cmd_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+                    r = orig_exec(cmd_type, payload)
+                    if cmd_type == "INTERACT_OBJECT":
+                        oid, oname = payload.get("id"), payload.get("name")
+                        if oid == 20790:
+                            fa.position = {"x": 1860, "y": 5244, "plane": 0}
+                        elif oname in d_idx:
+                            table = {"Gate of War": f1_d, "Rickety door": f2_d, "Oozing barrier": f3_d, "Portal of Death": f4_d}[oname]
+                            nx, ny = table[d_idx[oname]]
+                            d_idx[oname] += 1
+                            fa.position = {"x": nx, "y": ny, "plane": 0}
+                        elif oid == 20656:
+                            fa.varbits[2309] = 1
+                            fa._add_to_inventory({"item_id": 995, "name": "Coins", "quantity": 2000, "noted": False})
+                        elif oid == 20785:
+                            fa.position = {"x": 2042, "y": 5245, "plane": 0}
+                        elif oid == 19000:
+                            fa.varbits[2310] = 1
+                            fa._add_to_inventory({"item_id": 995, "name": "Coins", "quantity": 3000, "noted": False})
+                        elif oid == 19004:
+                            fa.position = {"x": 2123, "y": 5252, "plane": 0}
+                        elif oid == 23709:
+                            fa.varbits[2311] = 1
+                            fa._add_to_inventory({"item_id": 995, "name": "Coins", "quantity": 5000, "noted": False})
+                        elif oid == 23706:
+                            fa.position = {"x": 2358, "y": 5218, "plane": 0}
+                        elif oid == 23732:
+                            fa.position = {"x": 3081, "y": 3421, "plane": 0}
+                    elif cmd_type == "WIDGET_CLICK" and payload.get("groupId") == 270 and payload.get("childId") == 15:
+                        fa.varbits[2312] = 1
+                        fa._add_to_inventory({"item_id": 9005, "name": "Fancy boots", "quantity": 1, "noted": False})
+                    return r
+
+                fa.execute_raw_command = _sim_sh  # type: ignore[method-assign]
+                stronghold_summary = {"adapter": fa, "lease": lease}
             return fa
 
         res = runner.run_session(
@@ -646,17 +694,83 @@ def _cmd_simulate_pilot(args: argparse.Namespace) -> int:
                 else None
             ),
         )
+
+        mission_report: dict[str, Any] | None = None
+        if res.ok and args.recipe_id == "stage2_stronghold_10k" and stronghold_summary is not None:
+            # Also execute hermetic 4-floor Stronghold + GE Bank Turnaround simulation in an isolated scratch DB
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp_sim_dir:
+                sim_store = StateStore(Path(tmp_sim_dir) / "sim_kernel.db")
+                try:
+                    sim_store.register_account(
+                        account_id=acc_id,
+                        auth_mode="LEGACY_CREDENTIALS",
+                        credential_ref=f"vault://accounts/{acc_id}/auth",
+                        proxy_ref="vault://proxies/sim_loopback",
+                        region="EG",
+                        timezone_name="Africa/Cairo",
+                        persona_seed=102,
+                        initial_status=AccountStatus.READY,
+                    )
+                    from datetime import datetime, timezone
+                    sim_lease = sim_store.acquire_session_lease(
+                        account_id=acc_id,
+                        slot_id=0,
+                        task_id=args.recipe_id,
+                        now_utc=datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc),
+                        bypass_circadian=True,
+                    )
+                    sim_fa = _make_fake(sim_lease)
+                    sim_gate = GameAdapterGate(sim_store, sim_fa)
+                    sim_gate.bind_to_lease(
+                        account_id=acc_id,
+                        session_id=sim_lease["session_id"],
+                        lease_id=sim_lease["lease_id"],
+                        session_epoch=sim_lease["session_epoch"],
+                    )
+                    sim_kernel = ExecutionEngineKernel(
+                        gate=sim_gate,
+                        account_id=acc_id,
+                        session_id=sim_lease["session_id"],
+                        lease_id=sim_lease["lease_id"],
+                        session_epoch=sim_lease["session_epoch"],
+                        capabilities=AccountCapabilitiesContext(
+                            account_id=acc_id, skills={"agility": 1, "hitpoints": 10}, combat_level=3, is_member=False
+                        ),
+                    )
+                    sh_mod = _resolve_task_module("stage2_stronghold_10k")
+                    ticks_used = 0
+                    for step in range(1, 140):
+                        ticks_used = step
+                        tr = sim_kernel.step_tick(sh_mod, now_monotonic=float(step))
+                        if tr.halted:
+                            break
+                    banked_map = {it["name"]: it["quantity"] for it in sim_fa.bank_items}
+                    mission_report = {
+                        "floors_cleared": [f for f, vid in enumerate((2309, 2310, 2311, 2312), start=1) if sim_fa.varbits.get(vid) == 1],
+                        "ticks_simulated": ticks_used,
+                        "final_position": sim_fa.position,
+                        "banked_coins_gp": banked_map.get("Coins", 0),
+                        "fancy_boots_banked": banked_map.get("Fancy boots", 0) >= 1,
+                    }
+                finally:
+                    sim_store.close()
+
         store.export_snapshot()
+        out_payload: dict[str, Any] = {
+            "ok": res.ok,
+            "exit_code": res.exit_code,
+            "account_id": res.account_id,
+            "recipe_id": res.recipe_id,
+            "final_account_status": res.final_account_status,
+            "detail": res.detail,
+            "snapshot_path": str(data_dir / "state_snapshot.json"),
+        }
+        if mission_report is not None:
+            out_payload["stronghold_mission_simulation"] = mission_report
         print(
             json.dumps(
-                {
-                    "ok": res.ok,
-                    "exit_code": res.exit_code,
-                    "account_id": res.account_id,
-                    "recipe_id": res.recipe_id,
-                    "final_account_status": res.final_account_status,
-                    "detail": res.detail,
-                },
+                out_payload,
                 indent=2,
                 ensure_ascii=False,
             )

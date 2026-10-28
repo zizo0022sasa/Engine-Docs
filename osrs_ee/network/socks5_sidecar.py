@@ -156,10 +156,29 @@ class LocalSocks5Sidecar:
             pass
 
     def _dial_upstream_socks5(self, target_atyp_payload: bytes) -> socket.socket:
-        """Connect to upstream SOCKS5 proxy, authenticate via RFC 1929 if needed, and forward raw target."""
+        """Connect to upstream SOCKS5 proxy (or explicit DIRECT local socket) and forward target."""
         with self._lock:
             uri = self._upstream_uri
         parsed = urlparse(uri)
+        if parsed.scheme.lower() == "direct":
+            atyp = target_atyp_payload[0]
+            if atyp == 0x01:
+                dst_host = socket.inet_ntop(socket.AF_INET, target_atyp_payload[1:5])
+                dst_port = struct.unpack("!H", target_atyp_payload[5:7])[0]
+            elif atyp == 0x03:
+                dlen = target_atyp_payload[1]
+                dst_host = target_atyp_payload[2 : 2 + dlen].decode("utf-8")
+                dst_port = struct.unpack("!H", target_atyp_payload[2 + dlen : 4 + dlen])[0]
+            elif atyp == 0x04:
+                dst_host = socket.inet_ntop(socket.AF_INET6, target_atyp_payload[1:17])
+                dst_port = struct.unpack("!H", target_atyp_payload[17:19])[0]
+            else:
+                raise ProxySidecarError(f"Unsupported SOCKS5 ATYP in DIRECT mode: {atyp}")
+            direct_sock = socket.create_connection((dst_host, dst_port), timeout=self.connect_timeout_sec)
+            self._register_sock(direct_sock)
+            direct_sock.settimeout(None)
+            return direct_sock
+
         up_host = parsed.hostname
         up_port = parsed.port
         assert up_host is not None and up_port is not None
