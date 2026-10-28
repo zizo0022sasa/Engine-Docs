@@ -29,6 +29,9 @@ class FakeGameAdapter:
         bank_items: list[dict[str, Any]] | None = None,
         inventory_items: list[dict[str, Any]] | None = None,
         equipment_items: list[str] | None = None,
+        combat_level: int | None = None,
+        is_member: bool = False,
+        skill_xp: dict[str, int] | None = None,
     ) -> None:
         self.account_id = account_id
         self.session_id = session_id
@@ -61,6 +64,9 @@ class FakeGameAdapter:
         self.skills = dict(
             skills or {"hitpoints": 10, "agility": 1, "woodcutting": 35, "attack": 1, "fishing": 25, "mining": 20}
         )
+        self.skill_xp: dict[str, int] = dict(skill_xp or {})
+        self.combat_level: int | None = combat_level
+        self.is_member: bool = bool(is_member)
         self.hp_current: int = int(self.skills.get("hitpoints", 10))
         self.hp_max: int = int(self.skills.get("hitpoints", 10))
         self.run_energy: int = 100
@@ -121,6 +127,63 @@ class FakeGameAdapter:
             else:
                 out[ipid] = int(self.varps.get(ipid, 0))
         return out
+
+    def read_skills_snapshot(self) -> dict[str, Any]:
+        canonical = (
+            "Attack",
+            "Defence",
+            "Strength",
+            "Hitpoints",
+            "Ranged",
+            "Prayer",
+            "Magic",
+            "Cooking",
+            "Woodcutting",
+            "Fletching",
+            "Fishing",
+            "Firemaking",
+            "Crafting",
+            "Smithing",
+            "Mining",
+            "Herblore",
+            "Agility",
+            "Thieving",
+            "Slayer",
+            "Farming",
+            "Runecraft",
+            "Hunter",
+            "Construction",
+        )
+        lower_levels = {str(k).strip().lower(): int(v) for k, v in self.skills.items()}
+        lower_xp = {str(k).strip().lower(): int(v) for k, v in self.skill_xp.items()}
+        skills_list: list[dict[str, Any]] = []
+        for s_name in canonical:
+            key = s_name.lower()
+            default_lvl = 10 if key == "hitpoints" else 1
+            lvl = max(1, int(lower_levels.get(key, default_lvl)))
+            boosted = self.hp_current if key == "hitpoints" else lvl
+            xp = lower_xp.get(key, 1154 if key == "hitpoints" and lvl == 10 else max(0, (lvl - 1) * 100))
+            skills_list.append(
+                {
+                    "name": s_name,
+                    "level": lvl,
+                    "boostedLevel": boosted,
+                    "xp": xp,
+                }
+            )
+        total = sum(int(s["level"]) for s in skills_list)
+        return {
+            "count": len(skills_list),
+            "totalLevel": total,
+            "skills": skills_list,
+        }
+
+    def read_client_profile_hints(self) -> dict[str, Any]:
+        return {
+            "combat_level": self.combat_level,
+            "profile_is_member": self.is_member,
+            "playtime_minutes": self.playtime_minutes,
+        }
 
     def read_observation(self, *, monotonic_ms: int = 1000) -> dict[str, Any]:
         if not self.alive or self.transient_disconnect:

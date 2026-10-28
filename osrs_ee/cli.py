@@ -30,6 +30,7 @@ from typing import Any
 
 from osrs_ee.bots import BotModuleRegistry, TaskModule
 from osrs_ee.core import ExecutionEngineKernel
+from osrs_ee.discovery import AccountProfileSnapshot, UniversalAccountScanner
 from osrs_ee.economy import GEOrderLedger
 from osrs_ee.navigation import AccountCapabilitiesContext, ConstrainedWaypointGraph
 from osrs_ee.network import LocalSocks5Sidecar
@@ -47,9 +48,15 @@ from osrs_ee.sandbox import (
 from osrs_ee.security.redaction import Redactor
 from osrs_ee.security.secret_scan import scan_path
 from osrs_ee.security.vault import LocalSecretVault, ingest_pipe_lines, load_dotenv
-from osrs_ee.state import AccountStatus, OperatorRole, StateStore
+from osrs_ee.state import AccountStatus, OperatorRole, ReasonCode, StateStore
 from osrs_ee.tasks import CuratedRecipeRegistry, SingleSlotPilotRunner
-from osrs_ee.telemetry import GLOBAL_STORAGE_BUDGET_BYTES, BoundedOutbox, LogQuotaGuardian, TelegramGateway
+from osrs_ee.telemetry import (
+    GLOBAL_STORAGE_BUDGET_BYTES,
+    BoundedOutbox,
+    LogQuotaGuardian,
+    SmartEventNotifier,
+    TelegramGateway,
+)
 
 
 def _resolve_data_dir(raw_dir: str | None) -> Path:
@@ -397,6 +404,35 @@ def _reconcile_account_via_live_client(
         rec_adapter.kill_process_tree()
 
 
+def _create_runtime_notifier(
+    data_dir: Path,
+    store: StateStore,
+    redactor: Redactor,
+    *,
+    outbox: BoundedOutbox | None = None,
+) -> tuple[BoundedOutbox, SmartEventNotifier]:
+    """Create `BoundedOutbox` + `SmartEventNotifier` and bind `StateStore.on_crash_recovered`."""
+    eff_outbox = outbox if outbox is not None else BoundedOutbox(data_dir / "outbox.db", redactor=redactor)
+    notifier = SmartEventNotifier.from_runtime_env(
+        outbox=eff_outbox,
+        store=store,
+        redactor=redactor,
+        enable_live_http=True,
+    )
+
+    def _on_crash_recovered(updated_acc: dict[str, Any], note: str) -> None:
+        notifier.notify_crash_recovered(
+            account_id=str(updated_acc["account_id"]),
+            recovery_key=f"{updated_acc.get('session_epoch', 0)}:{updated_acc.get('state_version', 0)}",
+            previous_status="RECOVERY_REQUIRED",
+            new_status=str(updated_acc.get("status", "READY")),
+            diagnostic_note=note,
+        )
+
+    store.on_crash_recovered = _on_crash_recovered
+    return eff_outbox, notifier
+
+
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     """Dedicated crash-recovery & orphaned-lease reconciliation command (`python -m osrs_ee reconcile`)."""
     data_dir = _resolve_data_dir(args.data_dir)
@@ -410,6 +446,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         snapshot_path=data_dir / "state_snapshot.json",
         redactor=redactor,
     )
+    outbox, _notifier = _create_runtime_notifier(data_dir, store, redactor)
     try:
         if getattr(args, "force_boot_sweep", False):
             orphaned = store.reconcile_on_boot()
@@ -466,6 +503,181 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         _safe_print(redactor.redact_text(json.dumps(payload, indent=2, ensure_ascii=False)))
         return 0
     finally:
+        outbox.close()
+        store.close()
+
+
+def _cmd_scan_profile(args: argparse.Namespace) -> int:
+    """Fast (`<= 15s`) Universal Account Discovery Scanner (`python -m osrs_ee scan-profile`)."""
+    data_dir = _resolve_data_dir(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    redactor = (
+        LocalSecretVault(data_dir / "vault.json").redactor
+        if (data_dir / "vault.json").exists()
+        else Redactor()
+    )
+    token = _read_agent_token_file(args.token_file)
+    redactor.register_secret(token)
+
+    store = StateStore(
+        data_dir / "state.db",
+        snapshot_path=data_dir / "state_snapshot.json",
+        redactor=redactor,
+    )
+    outbox, _notifier = _create_runtime_notifier(data_dir, store, redactor)
+    try:
+        store.reconcile_orphaned_leases(target_account_id=args.account_id)
+
+        try:
+            acc = store.get_account(args.account_id)
+        except KeyError:
+            store.register_account(
+                account_id=args.account_id,
+                auth_mode="LEGACY_CREDENTIALS",
+                credential_ref=f"vault://accounts/{args.account_id}/auth",
+                proxy_ref=f"vault://proxies/local_scanned_{args.account_id}",
+                region="EG",
+                timezone_name="Africa/Cairo",
+                persona_seed=101,
+                initial_status=AccountStatus.PENDING_DISCOVERY,
+            )
+            acc = store.get_account(args.account_id)
+
+        from datetime import datetime, timedelta, timezone
+
+        now_utc = datetime.now(timezone.utc)
+        cur_state = AccountStatus(acc["status"])
+        if cur_state in (AccountStatus.RECOVERY_REQUIRED, AccountStatus.RECONCILING):
+            acc = _reconcile_account_via_live_client(
+                store=store,
+                account_id=args.account_id,
+                port=int(args.port),
+                agent_token=token,
+                redactor=redactor,
+                quiet=True,
+            )
+            cur_state = AccountStatus(acc["status"])
+        elif cur_state == AccountStatus.RESTING:
+            store._conn.execute(
+                "UPDATE accounts SET cooldown_until = ? WHERE account_id = ?",
+                ((now_utc - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), args.account_id),
+            )
+            store._conn.commit()
+            store.transition_resting_to_ready_if_due(args.account_id, now_utc)
+            acc = store.get_account(args.account_id)
+            cur_state = AccountStatus(acc["status"])
+
+        budget_sec = max(1.0, min(15.0, float(args.timeout_sec)))
+        scanner = UniversalAccountScanner(max_duration_sec=budget_sec)
+
+        active_lease_row = store._conn.execute(
+            "SELECT * FROM active_leases WHERE account_id = ?",
+            (args.account_id,),
+        ).fetchone()
+
+        if active_lease_row is not None:
+            # Another live worker currently holds the lease -> strictly non-intrusive read-only scan!
+            ro_adapter = MicrobotHttpAdapter(
+                account_id=args.account_id,
+                session_id=str(active_lease_row["session_id"]),
+                session_epoch=int(active_lease_row["session_epoch"]),
+                port=int(args.port),
+                agent_token=token,
+                coalesce_window_ms=0,
+            )
+            try:
+                snapshot = scanner.scan(
+                    account_id=args.account_id,
+                    adapter=ro_adapter,
+                    store=store,
+                    open_bank_if_closed=False,
+                    read_only=True,
+                )
+            finally:
+                ro_adapter.kill_process_tree()
+        elif cur_state == AccountStatus.PENDING_DISCOVERY:
+            occupied_slots = {
+                int(r["slot_id"])
+                for r in store._conn.execute("SELECT slot_id FROM active_leases").fetchall()
+            }
+            disc_slot = max(0, int(args.port) - 8081)
+            while disc_slot in occupied_slots:
+                disc_slot += 1
+            disc_lease = store.acquire_session_lease(
+                account_id=args.account_id,
+                slot_id=disc_slot,
+                task_id="UNIVERSAL_ACCOUNT_DISCOVERY",
+                session_kind="DISCOVERY",
+                bypass_circadian=True,
+            )
+            disc_adapter = MicrobotHttpAdapter(
+                account_id=args.account_id,
+                session_id=str(disc_lease["session_id"]),
+                session_epoch=int(disc_lease["session_epoch"]),
+                port=int(args.port),
+                agent_token=token,
+                coalesce_window_ms=0,
+            )
+            try:
+                disc_gate = GameAdapterGate(store, disc_adapter)  # type: ignore[arg-type]
+                disc_gate.bind_to_lease(
+                    account_id=args.account_id,
+                    session_id=str(disc_lease["session_id"]),
+                    lease_id=str(disc_lease["lease_id"]),
+                    session_epoch=int(disc_lease["session_epoch"]),
+                )
+                snapshot = scanner.scan(
+                    account_id=args.account_id,
+                    adapter=disc_adapter,
+                    store=store,
+                    gate=disc_gate,
+                    lease=disc_lease,
+                    open_bank_if_closed=not (bool(args.read_only) or bool(args.no_open_bank)),
+                    read_only=bool(args.read_only),
+                )
+                store.close_session(
+                    account_id=args.account_id,
+                    session_id=str(disc_lease["session_id"]),
+                    lease_id=str(disc_lease["lease_id"]),
+                    session_epoch=int(disc_lease["session_epoch"]),
+                    target_status=AccountStatus.READY,
+                    reason_code=ReasonCode.NONE,
+                )
+            finally:
+                disc_adapter.kill_process_tree()
+        else:
+            scan_adapter = MicrobotHttpAdapter(
+                account_id=args.account_id,
+                session_id=f"scan_{int(time.time())}",
+                session_epoch=max(1, int(acc["session_epoch"] or 1)),
+                port=int(args.port),
+                agent_token=token,
+                coalesce_window_ms=0,
+            )
+            try:
+                snapshot = scanner.scan(
+                    account_id=args.account_id,
+                    adapter=scan_adapter,
+                    store=store,
+                    open_bank_if_closed=not (bool(args.read_only) or bool(args.no_open_bank)),
+                    read_only=bool(args.read_only),
+                )
+            finally:
+                scan_adapter.kill_process_tree()
+
+        store.export_snapshot()
+        final_acc = store.get_account(args.account_id)
+        out = {
+            "ok": True,
+            "account_id": args.account_id,
+            "port": int(args.port),
+            "account_status": str(final_acc["status"]),
+            "profile": snapshot.to_dict(),
+        }
+        _safe_print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
+        return 0
+    finally:
+        outbox.close()
         store.close()
 
 
@@ -485,6 +697,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
         snapshot_path=data_dir / "state_snapshot.json",
         redactor=redactor,
     )
+    outbox, notifier = _create_runtime_notifier(data_dir, store, redactor)
     try:
         # 1. Reclaim any orphaned leases left behind by power outage / SIGKILL without disturbing live slots
         store.reconcile_orphaned_leases(target_account_id=args.account_id)
@@ -558,13 +771,29 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             lease_id=lease["lease_id"],
             session_epoch=lease["session_epoch"],
         )
-        caps = AccountCapabilitiesContext(
-            account_id=args.account_id,
-            skills={"agility": int(args.agility), "hitpoints": 10},
-            combat_level=int(args.combat_level),
-            quest_points=int(acc["quest_points"] or 0),
-            is_member=bool(args.member),
-        )
+        saved_prof = store.get_account_profile(args.account_id)
+        if saved_prof is not None:
+            prof_snap = AccountProfileSnapshot.from_dict(saved_prof)
+            merged_skills = dict(prof_snap.skills)
+            if int(args.agility) != 1:
+                merged_skills["agility"] = int(args.agility)
+            caps = AccountCapabilitiesContext(
+                account_id=args.account_id,
+                skills=merged_skills,
+                combat_level=int(args.combat_level) if int(args.combat_level) != 3 else prof_snap.combat_level,
+                quest_points=prof_snap.quest_points,
+                completed_quests=frozenset(prof_snap.completed_quests),
+                is_member=bool(args.member) or prof_snap.is_member,
+                coins_gp=prof_snap.total_liquid_coins_gp,
+            )
+        else:
+            caps = AccountCapabilitiesContext(
+                account_id=args.account_id,
+                skills={"agility": int(args.agility), "hitpoints": 10},
+                combat_level=int(args.combat_level),
+                quest_points=int(acc["quest_points"] or 0),
+                is_member=bool(args.member),
+            )
         kernel = ExecutionEngineKernel(
             gate=gate,
             account_id=args.account_id,
@@ -572,11 +801,15 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             lease_id=lease["lease_id"],
             session_epoch=lease["session_epoch"],
             capabilities=caps,
+            notifier=notifier,
+            slot_id=slot_id,
+            adapter_port=int(args.port),
         )
         task_mod = _resolve_task_module(
             args.recipe_id,
             min_required_food=getattr(args, "require_food_count", None),
         )
+        kernel.emit_session_started(task_id=task_mod.module_id)
         stop_event = threading.Event()
         max_ticks = max(1, int(args.max_ticks))
         ticks_run = 0
@@ -604,6 +837,16 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
                     stop_event.wait(timeout=rem)
         except KeyboardInterrupt:
             stop_event.set()
+            kernel.notify_emergency_abort(
+                reason_code="ABORT_TASK",
+                detail="Operator KeyboardInterrupt emergency abort",
+            )
+        except ConnectionError as exc:
+            kernel.notify_emergency_abort(
+                reason_code=ReasonCode.PROXY_UNAVAILABLE.value,
+                detail=str(exc),
+            )
+            raise
         finally:
             adapter.kill_process_tree()
             cur_acc = store.get_account(args.account_id)
@@ -635,6 +878,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
         _safe_print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
         return 0
     finally:
+        outbox.close()
         store.close()
 
 
@@ -683,6 +927,7 @@ def _build_telegram_env_context(data_dir: Path) -> tuple[Redactor, StateStore, B
     )
     store.reconcile_orphaned_leases()
     outbox = BoundedOutbox(data_dir / "outbox.db", redactor=redactor)
+    _create_runtime_notifier(data_dir, store, redactor, outbox=outbox)
     gw = TelegramGateway(
         store=store,
         outbox=outbox,
@@ -1244,6 +1489,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.add_argument("--account-id", default="acc_live_01")
     p_probe.add_argument("--token-file", default=None, help="Path to .agent-token (default: ~/.runelite/.agent-token)")
 
+    p_scan = sub.add_parser(
+        "scan-profile",
+        help="Run fast (<=15s) Universal Account Discovery Scanner & save AccountProfileSnapshot to state.db",
+    )
+    p_scan.add_argument("--account-id", required=True, help="Opaque account identifier (e.g. acc_02)")
+    p_scan.add_argument("--port", type=int, default=8081, help="Microbot AgentServer TCP port (default: 8081)")
+    p_scan.add_argument("--token-file", default=None, help="Path to .agent-token (default: ~/.runelite/.agent-token)")
+    p_scan.add_argument("--timeout-sec", type=float, default=15.0, help="Hard discovery wall-clock budget in seconds (max 15.0)")
+    p_scan.add_argument("--read-only", action="store_true", help="Do not interact with nearby bank booth if bank is closed")
+    p_scan.add_argument("--no-open-bank", action="store_true", help="Skip opening closed bank during profile scan")
+
     p_att = sub.add_parser("attach-bot", help="Attach a decoupled TaskModule bot to a running Microbot port 8081")
     p_att.add_argument("--recipe-id", default="stage2_stronghold_10k", choices=list(BotModuleRegistry().list_registered_ids()))
     p_att.add_argument("--port", type=int, default=8081)
@@ -1312,6 +1568,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_simulate_pilot(args)
     if cmd == "live-probe":
         return _cmd_live_probe(args)
+    if cmd == "scan-profile":
+        return _cmd_scan_profile(args)
     if cmd == "attach-bot":
         return _cmd_attach_bot(args)
     if cmd == "dry-run-slot":

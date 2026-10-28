@@ -115,11 +115,13 @@ class StateStore:
         *,
         snapshot_path: str | Path | None = None,
         redactor: Redactor | None = None,
+        on_crash_recovered: Callable[[dict[str, Any], str], None] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.snapshot_path = Path(snapshot_path) if snapshot_path else None
         self.redactor = redactor or Redactor()
+        self.on_crash_recovered = on_crash_recovered
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             str(self.db_path),
@@ -225,6 +227,34 @@ class StateStore:
                     consumed_at TEXT,
                     consumed_by_user_id INTEGER
                 );
+
+                CREATE TABLE IF NOT EXISTS account_profiles (
+                    account_id TEXT PRIMARY KEY REFERENCES accounts(account_id),
+                    combat_level INTEGER NOT NULL,
+                    total_level INTEGER NOT NULL,
+                    is_member INTEGER NOT NULL DEFAULT 0,
+                    membership_days INTEGER NOT NULL DEFAULT 0,
+                    tutorial_varp_281 INTEGER NOT NULL DEFAULT 0,
+                    quest_points INTEGER NOT NULL DEFAULT 0,
+                    playtime_minutes INTEGER NOT NULL DEFAULT 0,
+                    inventory_coins_gp INTEGER NOT NULL DEFAULT 0,
+                    bank_coins_gp INTEGER NOT NULL DEFAULT 0,
+                    total_liquid_coins_gp INTEGER NOT NULL DEFAULT 0,
+                    bank_scanned INTEGER NOT NULL DEFAULT 0,
+                    skills_json TEXT NOT NULL,
+                    skill_xp_json TEXT NOT NULL,
+                    completed_quests_json TEXT NOT NULL,
+                    stronghold_floors_json TEXT NOT NULL,
+                    available_tools_json TEXT NOT NULL,
+                    available_gear_json TEXT NOT NULL,
+                    available_food_json TEXT NOT NULL,
+                    inventory_json TEXT NOT NULL,
+                    bank_json TEXT NOT NULL,
+                    eligible_recipes_json TEXT NOT NULL,
+                    position_json TEXT NOT NULL,
+                    scan_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    scanned_at TEXT NOT NULL
+                );
                 """
             )
             existing_cols = {
@@ -255,10 +285,15 @@ class StateStore:
     def _export_snapshot_unlocked(self) -> None:
         assert self.snapshot_path is not None
         rows = self._conn.execute("SELECT * FROM accounts ORDER BY account_id").fetchall()
+        prof_rows = {
+            str(pr["account_id"]): pr
+            for pr in self._conn.execute("SELECT * FROM account_profiles").fetchall()
+        }
         accounts_dict: dict[str, Any] = {}
         for r in rows:
-            accounts_dict[r["account_id"]] = {
-                "account_id": r["account_id"],
+            aid = str(r["account_id"])
+            entry: dict[str, Any] = {
+                "account_id": aid,
                 "auth_mode": r["auth_mode"],
                 "credential_ref": r["credential_ref"],
                 "proxy_ref": r["proxy_ref"],
@@ -280,6 +315,18 @@ class StateStore:
                     "realized_gp": r["realized_gp"],
                 },
             }
+            pr = prof_rows.get(aid)
+            if pr is not None:
+                entry["discovered_profile"] = {
+                    "combat_level": int(pr["combat_level"]),
+                    "total_level": int(pr["total_level"]),
+                    "is_member": bool(pr["is_member"]),
+                    "total_liquid_coins_gp": int(pr["total_liquid_coins_gp"]),
+                    "bank_scanned": bool(pr["bank_scanned"]),
+                    "eligible_recipes": json.loads(str(pr["eligible_recipes_json"])),
+                    "scanned_at": str(pr["scanned_at"]),
+                }
+            accounts_dict[aid] = entry
         snapshot = self.redactor.redact_obj(
             {
                 "schema_version": "1.0",
@@ -1237,7 +1284,190 @@ class StateStore:
                 reason_code=ReasonCode.NONE,
                 now_utc=now_dt,
             )
-            return self.get_account(account_id)
+            updated_acc = self.get_account(account_id)
+
+        if self.on_crash_recovered is not None:
+            try:
+                self.on_crash_recovered(updated_acc, clean_note)
+            except Exception:
+                pass
+        return updated_acc
+
+    # ------------------------------------------------------------------
+    # Universal Account Profile Persistence (`PR-17` / `AccountProfileSnapshot`)
+    # ------------------------------------------------------------------
+    def save_account_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        now_utc: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist a discovered `AccountProfileSnapshot` and sync `accounts` progression."""
+        acc_id = str(profile["account_id"])
+        clean_prof = self.redactor.redact_obj(dict(profile))
+        now_s = _utc_iso(now_utc or datetime.now(timezone.utc))
+        scanned_at = str(clean_prof.get("scanned_at") or now_s)
+
+        tut_281 = int(clean_prof.get("tutorial_varp_281", 0))
+        qp = int(clean_prof.get("quest_points", 0))
+        ttl = int(clean_prof.get("total_level", 32))
+        play_mins = int(clean_prof.get("playtime_minutes", 0))
+        stage, trade_unlocked = compute_progression_stage(
+            tutorial_varp_281=tut_281,
+            quest_points=qp,
+            total_level=ttl,
+            playtime_minutes=play_mins,
+        )
+
+        with self._lock:
+            _ = self.get_account(acc_id)
+            try:
+                self._tx_begin()
+                self._conn.execute(
+                    """
+                    INSERT INTO account_profiles (
+                        account_id, combat_level, total_level, is_member, membership_days,
+                        tutorial_varp_281, quest_points, playtime_minutes,
+                        inventory_coins_gp, bank_coins_gp, total_liquid_coins_gp, bank_scanned,
+                        skills_json, skill_xp_json, completed_quests_json, stronghold_floors_json,
+                        available_tools_json, available_gear_json, available_food_json,
+                        inventory_json, bank_json, eligible_recipes_json, position_json,
+                        scan_duration_ms, scanned_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        combat_level = excluded.combat_level,
+                        total_level = excluded.total_level,
+                        is_member = excluded.is_member,
+                        membership_days = excluded.membership_days,
+                        tutorial_varp_281 = excluded.tutorial_varp_281,
+                        quest_points = excluded.quest_points,
+                        playtime_minutes = excluded.playtime_minutes,
+                        inventory_coins_gp = excluded.inventory_coins_gp,
+                        bank_coins_gp = excluded.bank_coins_gp,
+                        total_liquid_coins_gp = excluded.total_liquid_coins_gp,
+                        bank_scanned = excluded.bank_scanned,
+                        skills_json = excluded.skills_json,
+                        skill_xp_json = excluded.skill_xp_json,
+                        completed_quests_json = excluded.completed_quests_json,
+                        stronghold_floors_json = excluded.stronghold_floors_json,
+                        available_tools_json = excluded.available_tools_json,
+                        available_gear_json = excluded.available_gear_json,
+                        available_food_json = excluded.available_food_json,
+                        inventory_json = excluded.inventory_json,
+                        bank_json = excluded.bank_json,
+                        eligible_recipes_json = excluded.eligible_recipes_json,
+                        position_json = excluded.position_json,
+                        scan_duration_ms = excluded.scan_duration_ms,
+                        scanned_at = excluded.scanned_at
+                    """,
+                    (
+                        acc_id,
+                        int(clean_prof.get("combat_level", 3)),
+                        ttl,
+                        1 if bool(clean_prof.get("is_member", False)) else 0,
+                        int(clean_prof.get("membership_days", 0)),
+                        tut_281,
+                        qp,
+                        play_mins,
+                        int(clean_prof.get("inventory_coins_gp", 0)),
+                        int(clean_prof.get("bank_coins_gp", 0)),
+                        int(clean_prof.get("total_liquid_coins_gp", 0)),
+                        1 if bool(clean_prof.get("bank_scanned", False)) else 0,
+                        json.dumps(clean_prof.get("skills") or {}, ensure_ascii=False),
+                        json.dumps(clean_prof.get("skill_xp") or {}, ensure_ascii=False),
+                        json.dumps(clean_prof.get("completed_quests") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("stronghold_floors_claimed") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("available_tools") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("available_gear") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("available_food") or {}, ensure_ascii=False),
+                        json.dumps(clean_prof.get("inventory_summary") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("bank_summary") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("eligible_recipes") or [], ensure_ascii=False),
+                        json.dumps(clean_prof.get("position") or {}, ensure_ascii=False),
+                        int(clean_prof.get("scan_duration_ms", 0)),
+                        scanned_at,
+                    ),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE accounts
+                       SET tutorial_varp_281 = ?,
+                           quest_points = ?,
+                           total_level = ?,
+                           playtime_minutes = ?,
+                           stage = ?,
+                           trade_unlocked = ?,
+                           state_version = state_version + 1,
+                           updated_at = ?
+                     WHERE account_id = ?
+                    """,
+                    (
+                        tut_281,
+                        qp,
+                        ttl,
+                        play_mins,
+                        stage,
+                        1 if trade_unlocked else 0,
+                        now_s,
+                        acc_id,
+                    ),
+                )
+                self._tx_commit()
+            except Exception:
+                self._tx_rollback()
+                raise
+            stored = self.get_account_profile(acc_id)
+            assert stored is not None
+            return stored
+
+    def get_account_profile(self, account_id: str) -> dict[str, Any] | None:
+        """Return deserialized `AccountProfileSnapshot` dictionary from `account_profiles`, or `None`."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM account_profiles WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            tut_281 = int(row["tutorial_varp_281"])
+            qp = int(row["quest_points"])
+            ttl = int(row["total_level"])
+            play_mins = int(row["playtime_minutes"])
+            stage, trade_unlocked = compute_progression_stage(
+                tutorial_varp_281=tut_281,
+                quest_points=qp,
+                total_level=ttl,
+                playtime_minutes=play_mins,
+            )
+            return {
+                "account_id": str(row["account_id"]),
+                "combat_level": int(row["combat_level"]),
+                "total_level": ttl,
+                "skills": json.loads(str(row["skills_json"])),
+                "skill_xp": json.loads(str(row["skill_xp_json"])),
+                "is_member": bool(row["is_member"]),
+                "membership_days": int(row["membership_days"]),
+                "tutorial_varp_281": tut_281,
+                "quest_points": qp,
+                "completed_quests": json.loads(str(row["completed_quests_json"])),
+                "stronghold_floors_claimed": json.loads(str(row["stronghold_floors_json"])),
+                "playtime_minutes": play_mins,
+                "progression_stage": stage,
+                "trade_unlocked": trade_unlocked,
+                "position": json.loads(str(row["position_json"])),
+                "inventory_coins_gp": int(row["inventory_coins_gp"]),
+                "bank_coins_gp": int(row["bank_coins_gp"]),
+                "total_liquid_coins_gp": int(row["total_liquid_coins_gp"]),
+                "bank_scanned": bool(row["bank_scanned"]),
+                "available_tools": json.loads(str(row["available_tools_json"])),
+                "available_gear": json.loads(str(row["available_gear_json"])),
+                "available_food": json.loads(str(row["available_food_json"])),
+                "inventory_summary": json.loads(str(row["inventory_json"])),
+                "bank_summary": json.loads(str(row["bank_json"])),
+                "eligible_recipes": json.loads(str(row["eligible_recipes_json"])),
+                "scan_duration_ms": int(row["scan_duration_ms"]),
+                "scanned_at": str(row["scanned_at"]),
+            }
 
     # ------------------------------------------------------------------
     # RBAC & Single-Use Bound Approvals (AUD-04 / T03, T09)

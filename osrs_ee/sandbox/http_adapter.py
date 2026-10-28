@@ -109,6 +109,7 @@ class MicrobotHttpAdapter:
         self._supports_varp_run_endpoint: bool = True
         self._supports_run_endpoint: bool = True
         self._supports_objects_query_endpoint: bool = True
+        self._supports_profiles_endpoint: bool = True
         self._assumed_run_enabled: bool = False
         self.http_request_count = 0
         self.tcp_connect_count = 0
@@ -339,6 +340,46 @@ class MicrobotHttpAdapter:
             except EndpointNotFoundError:
                 break
         return out
+
+    def read_skills_snapshot(self) -> dict[str, Any]:
+        """Query live `GET /skills` (`SkillsHandler.java`) returning all 23 skills, boosted levels, XP, and totalLevel."""
+        try:
+            resp = self._request_json("GET", "/skills")
+        except EndpointNotFoundError:
+            return {"count": 0, "totalLevel": 0, "skills": []}
+        if not isinstance(resp, dict):
+            return {"count": 0, "totalLevel": 0, "skills": []}
+        raw_skills = resp.get("skills") if isinstance(resp.get("skills"), list) else []
+        return {
+            "count": _first_int(resp.get("count"), len(raw_skills)) or 0,
+            "totalLevel": _first_int(resp.get("totalLevel")) or 0,
+            "skills": [dict(s) for s in raw_skills if isinstance(s, dict)],
+        }
+
+    def read_client_profile_hints(self) -> dict[str, Any]:
+        """Read non-sensitive combat level (`/state`) and active profile membership flag (`/profiles`)."""
+        status = self._fetch_status_with_fallback()
+        player_obj = status.get("player") if isinstance(status.get("player"), dict) else {}
+        combat_lvl = _first_int(status.get("combatLevel"), player_obj.get("combatLevel"))
+        playtime_mins = _first_int(status.get("playtimeMinutes"), player_obj.get("playtimeMinutes"))
+
+        prof_is_member: bool | None = None
+        if isinstance(status.get("isMember"), bool):
+            prof_is_member = bool(status["isMember"])
+        else:
+            prof_resp = self._fetch_optional_json("/profiles", flag_attr="_supports_profiles_endpoint")
+            if isinstance(prof_resp, dict) and isinstance(prof_resp.get("profiles"), list):
+                for p in prof_resp["profiles"]:
+                    if isinstance(p, dict) and bool(p.get("active")):
+                        if isinstance(p.get("isMember"), bool):
+                            prof_is_member = bool(p["isMember"])
+                        break
+
+        return {
+            "combat_level": combat_lvl,
+            "profile_is_member": prof_is_member,
+            "playtime_minutes": playtime_mins,
+        }
 
     def read_observation(self, *, monotonic_ms: int | None = None) -> dict[str, Any]:
         mono = monotonic_ms if monotonic_ms is not None else int(time.monotonic() * 1000)

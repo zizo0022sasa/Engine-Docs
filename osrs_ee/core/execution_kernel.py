@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TaskModule, TickContext
 from osrs_ee.core.lifecycle_manager import ClientLifecycleState, SessionLifecycleManager
@@ -20,6 +20,9 @@ from osrs_ee.navigation.capabilities import AccountCapabilitiesContext
 from osrs_ee.navigation.waypoint_graph import NavigationEngine, WorldPoint
 from osrs_ee.runtime.adapter_gate import GameAdapterGate
 from osrs_ee.state.fsm import AccountStatus, ReasonCode
+
+if TYPE_CHECKING:
+    from osrs_ee.telemetry.smart_notifier import SmartEventNotifier
 
 
 def _coalesce_int(val: Any, fallback: int) -> int:
@@ -56,6 +59,9 @@ class ExecutionEngineKernel:
         lifecycle: SessionLifecycleManager | None = None,
         watchdog: ReactiveSafetyWatchdog | None = None,
         navigation: NavigationEngine | None = None,
+        notifier: SmartEventNotifier | None = None,
+        slot_id: int = 0,
+        adapter_port: int | None = None,
     ) -> None:
         self.gate = gate
         self.account_id = account_id
@@ -66,9 +72,77 @@ class ExecutionEngineKernel:
         self.lifecycle = lifecycle or SessionLifecycleManager()
         self.watchdog = watchdog or ReactiveSafetyWatchdog()
         self.navigation = navigation or NavigationEngine()
+        self.notifier = notifier
+        self.slot_id = int(slot_id)
+        self.adapter_port = adapter_port if adapter_port is not None else getattr(gate.adapter, "port", None)
         self._last_seen_tick: int | None = None
         self._internal_tick_counter: int = 0
         self._session_run_bootstrapped: bool = False
+        self._active_task_id: str = ""
+        self._last_known_bank_items: tuple[dict[str, Any], ...] = ()
+
+    def emit_session_started(self, *, task_id: str) -> None:
+        """Emit single deduplicated `🚀 بدء جلسة حساب` notification via `BoundedOutbox`."""
+        self._active_task_id = task_id
+        if self.notifier is not None:
+            self.notifier.notify_session_started(
+                account_id=self.account_id,
+                session_id=self.session_id,
+                task_id=task_id,
+                slot_id=self.slot_id,
+                port=self.adapter_port,
+            )
+
+    def notify_emergency_abort(
+        self,
+        *,
+        reason_code: str = "ABORT_TASK",
+        detail: str = "Operator or supervisor emergency abort",
+    ) -> None:
+        """Emit deduplicated `🚨 تنبيه طوارئ P0` for `ABORT_TASK` or `PROXY_UNAVAILABLE`."""
+        if self.notifier is not None:
+            self.notifier.notify_p0_incident(
+                account_id=self.account_id,
+                session_id=self.session_id,
+                reason_code=reason_code,
+                task_id=self._active_task_id,
+                slot_id=self.slot_id,
+                port=self.adapter_port,
+                detail=detail,
+            )
+
+    def _summarize_wealth_and_loot(
+        self, inv_items: list[dict[str, Any]]
+    ) -> tuple[int, tuple[str, ...]]:
+        """Summarize total banked + inventory `Coins (995)` and non-coin loot for `COMPLETE_TASK`."""
+        bank_coins = 0
+        inv_coins = 0
+        loot_totals: dict[str, int] = {}
+
+        for b_it in self._last_known_bank_items:
+            iid = b_it.get("item_id", b_it.get("id"))
+            nm = str(b_it.get("name") or "").strip()
+            qty = max(0, _coalesce_int(b_it.get("quantity"), 0))
+            if qty <= 0:
+                continue
+            if (iid == 995 or nm.casefold() == "coins") and not bool(b_it.get("noted", False)):
+                bank_coins += qty
+            elif nm:
+                loot_totals[nm] = loot_totals.get(nm, 0) + qty
+
+        for i_it in inv_items:
+            iid = i_it.get("item_id", i_it.get("id"))
+            nm = str(i_it.get("name") or "").strip()
+            qty = max(0, _coalesce_int(i_it.get("quantity"), 0))
+            if qty <= 0:
+                continue
+            if (iid == 995 or nm.casefold() == "coins") and not bool(i_it.get("noted", False)):
+                inv_coins += qty
+            elif nm:
+                loot_totals[nm] = loot_totals.get(nm, 0) + qty
+
+        loot_labels = tuple(f"{name} x{cnt}" for name, cnt in list(loot_totals.items())[:8])
+        return (bank_coins + inv_coins, loot_labels)
 
     def _make_intent(
         self,
@@ -108,6 +182,7 @@ class ExecutionEngineKernel:
     ) -> KernelTickResult:
         """Execute a single non-blocking engine cycle (ZERO `time.sleep()`)."""
         dispatched: list[str] = []
+        self.emit_session_started(task_id=task_module.module_id)
 
         def _dispatch_relogin() -> None:
             intent = self._make_intent(
@@ -140,6 +215,16 @@ class ExecutionEngineKernel:
                     target_status=AccountStatus.RECOVERY_REQUIRED,
                     reason_code=ReasonCode.CRASH_UNCLOSED_SESSION,
                 )
+                if self.notifier is not None:
+                    self.notifier.notify_p0_incident(
+                        account_id=self.account_id,
+                        session_id=self.session_id,
+                        reason_code=ReasonCode.PROXY_UNAVAILABLE.value,
+                        task_id=task_module.module_id,
+                        slot_id=self.slot_id,
+                        port=self.adapter_port,
+                        detail=lc.detail,
+                    )
             return KernelTickResult(
                 lifecycle_state=lc.state,
                 safety_verdict=None,
@@ -223,6 +308,16 @@ class ExecutionEngineKernel:
                 target_status=AccountStatus.BLOCKED,
                 reason_code=reason,
             )
+            if self.notifier is not None:
+                self.notifier.notify_p0_incident(
+                    account_id=self.account_id,
+                    session_id=self.session_id,
+                    reason_code=reason.value,
+                    task_id=task_module.module_id,
+                    slot_id=self.slot_id,
+                    port=self.adapter_port,
+                    detail=safety.detail,
+                )
             return KernelTickResult(
                 lifecycle_state=live_lc_state,
                 safety_verdict=safety.verdict,
@@ -279,6 +374,8 @@ class ExecutionEngineKernel:
         bank_obs = obs.get("bank") or {}
         bank_is_open = bool(bank_obs.get("is_open", False))
         bank_items_tuple = tuple(bank_obs.get("items") or ())
+        if bank_is_open and isinstance(bank_obs.get("items"), list):
+            self._last_known_bank_items = tuple(dict(it) for it in bank_obs["items"] if isinstance(it, dict))
 
         ctx = TickContext(
             game_tick=curr_tick,
@@ -356,6 +453,21 @@ class ExecutionEngineKernel:
                 dispatched=dispatched,
             )
             if turn_outcome is not None:
+                if self.notifier is not None:
+                    p0_reason = (
+                        ReasonCode.BANK_PIN_REQUIRED.value
+                        if turn_outcome == "BANK_PIN_REQUIRED"
+                        else ReasonCode.INSUFFICIENT_RESOURCES.value
+                    )
+                    self.notifier.notify_p0_incident(
+                        account_id=self.account_id,
+                        session_id=self.session_id,
+                        reason_code=p0_reason,
+                        task_id=task_module.module_id,
+                        slot_id=self.slot_id,
+                        port=self.adapter_port,
+                        detail=turn_outcome,
+                    )
                 return KernelTickResult(
                     lifecycle_state=live_lc_state,
                     safety_verdict=safety.verdict,
@@ -387,6 +499,16 @@ class ExecutionEngineKernel:
                 target_status=AccountStatus.BLOCKED,
                 reason_code=ReasonCode.HUMAN_AUTH_REQUIRED,
             )
+            if self.notifier is not None:
+                self.notifier.notify_p0_incident(
+                    account_id=self.account_id,
+                    session_id=self.session_id,
+                    reason_code=ReasonCode.HUMAN_AUTH_REQUIRED.value,
+                    task_id=task_module.module_id,
+                    slot_id=self.slot_id,
+                    port=self.adapter_port,
+                    detail=directive.reason,
+                )
             return KernelTickResult(
                 lifecycle_state=live_lc_state,
                 safety_verdict=safety.verdict,
@@ -395,6 +517,48 @@ class ExecutionEngineKernel:
                 halted=True,
                 detail=directive.reason,
             )
+
+        elif directive.directive_type == DirectiveType.COMPLETE_TASK:
+            coins_gp, loot_labels = self._summarize_wealth_and_loot(inv_items)
+            session_closed = False
+            try:
+                cur_acc = self.gate.store.get_account(self.account_id)
+                cur_st = AccountStatus(cur_acc["status"])
+                if cur_st in (AccountStatus.RUNNING, AccountStatus.STARTING, AccountStatus.LEASED):
+                    self.gate.store.close_session(
+                        account_id=self.account_id,
+                        session_id=self.session_id,
+                        lease_id=self.lease_id,
+                        session_epoch=self.session_epoch,
+                        target_status=AccountStatus.RESTING,
+                        reason_code=ReasonCode.NONE,
+                    )
+                    session_closed = True
+                elif cur_st == AccountStatus.DISCOVERING:
+                    self.gate.store.close_session(
+                        account_id=self.account_id,
+                        session_id=self.session_id,
+                        lease_id=self.lease_id,
+                        session_epoch=self.session_epoch,
+                        target_status=AccountStatus.READY,
+                        reason_code=ReasonCode.NONE,
+                    )
+                    session_closed = True
+            except Exception:
+                session_closed = False
+
+            if self.notifier is not None:
+                self.notifier.notify_task_completed(
+                    account_id=self.account_id,
+                    session_id=self.session_id,
+                    task_id=task_module.module_id,
+                    slot_id=self.slot_id,
+                    port=self.adapter_port,
+                    coins_gp=coins_gp,
+                    loot_summary=loot_labels,
+                    session_closed=session_closed,
+                    detail=directive.reason,
+                )
 
         return KernelTickResult(
             lifecycle_state=live_lc_state,
@@ -454,13 +618,21 @@ class ExecutionEngineKernel:
                 for it in inv_items
             )
             if has_depositable:
+                def _verify_deposit_and_cache_bank(post: dict[str, Any]) -> bool:
+                    post_bank = post.get("bank") or {}
+                    if post_bank.get("is_open") and isinstance(post_bank.get("items"), list):
+                        self._last_known_bank_items = tuple(
+                            dict(it) for it in post_bank["items"] if isinstance(it, dict)
+                        )
+                    return len(post["inventory"]["items"] or []) == 0
+
                 self.gate.dispatch_verified_command(
                     intent=self._make_intent(
                         "BANK_DEPOSIT_INVENTORY",
                         {},
                         idempotency_class="IDEMPOTENT",
                     ),
-                    postcondition_checker=lambda post: len(post["inventory"]["items"] or []) == 0,
+                    postcondition_checker=_verify_deposit_and_cache_bank,
                 )
                 dispatched.append("BANK_DEPOSIT_INVENTORY")
                 return None

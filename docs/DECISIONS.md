@@ -101,6 +101,13 @@
   3. **إضافة وإدارة الحسابات عبر التليجرام بلا تسريب (`Telegram Ingest`):** ربط `TelegramGateway` بـ `LocalSecretVault` لدعم `/add_account` (حصراً لدور `ADMIN` بصيغتي `Legacy` و`Jagex` الفردية والدفعات)، `/accounts` (`VIEWER+`)، و`/reconcile` (`OPERATOR+`)، مع منع انعكاس أي سر في رسائل الخطأ واستدعاء `POST /deleteMessage` تلقائياً لمسح رسالة الاعتمادات الخام من سجل الدردشة.
 * **السبب والثقة:** ضمان الصمود الفوري أمام انقطاع الكهرباء وبيئة `Windows CP1252` وتجهيز المرحلة الثانية والثالثة من خريطة الأسطول (`3–4` حسابات متوازية). (الثقة: عالية جداً — مختبر بـ `T52..T55`).
 
+### `ADR-016` — الإشعارات التلقائية الذكية عديمة الإزعاج عبر `BoundedOutbox` وماسح اكتشاف الحسابات الشامل لأي مستوى (`PR-17`)
+* **الحالة:** `ACCEPTED` | **المصادر:** الركائز `5–7` في دستور `docs/zizo_bolla_field_testing_protocol.md` (`v2.0`) + `ADR-007, ADR-010, ADR-012`
+* **القرار:**
+  1. **الإشعارات الذكية المحكومة بـ `SmartEventNotifier` (`Zero Tick Spam`):** قصر الإرسال التلقائي عبر `BoundedOutbox` على 4 أحداث تشغيلية عالية القيمة فقط مع منع التكرار لكل جلسة (`Deduplication`) وحماية أولوية `P0_INCIDENT` من الإزاحة وعدم تعطيل حلقة النبضات (`0.6s`) عند انقطاع الإنترنت: `SESSION_STARTED` (`🚀 بدء جلسة حساب`)، `TASK_COMPLETED` (`🏆 إتمام المهمة وإيداع الغنائم في البنك` مع إغلاق الجلسة بأمان إلى `RESTING`)، `P0_INCIDENT` (`🚨 تنبيه طوارئ P0` عند `DEATH_QUARANTINE` أو `2FA/PIN` أو `PROXY_UNAVAILABLE` أو `ABORT_TASK`)، و`CRASH_RECOVERED` (`🔧 استرداد تلقائي بعد انقطاع` عند `RECOVERY_REQUIRED -> READY`).
+  2. **ماسح اكتشاف الحسابات الشامل (`UniversalAccountScanner` + `AccountProfileSnapshot`):** فحص أي حساب (`Level 3 .. 126`) خلال ميزانية زمنية صارمة `<= 15s` عبر `GET /skills` (الـ 23 مهارة كاملة مع الخبرة)، `GET /state` (`combatLevel`)، `Varp 101/281/1780` و`Varbits 2309..2312`، وجرد العملات (`Coins 995`) والأدوات والمعدات والطعام في الحقيبة والبنك، مع حفظ اللقطة ذرياً في جدول `account_profiles` داخل `state.db` وتغذية `AccountCapabilitiesContext` تلقائياً في `attach-bot` وتوفير الأمر المستقل `python -m osrs_ee scan-profile --account-id acc_02 --port 8081`.
+* **السبب والثقة:** تحويل المحرك إلى منصة أسطول ديناميكية تقبل أي حساب في أي مستوى وتبلغ المشغل بالأحداث المفصلية فقط دون ضوضاء. (الثقة: عالية جداً — مختبر بـ `T56..T61`).
+
 ---
 
 ## 2. القرارات المعلقة بانتظار المالك (`Pending Owner Decisions`)
