@@ -1,25 +1,35 @@
-"""Complete 4-Floor Stronghold of Security Task Module (`osrs_ee/bots/stronghold_module.py` — PR-13).
+"""Complete 4-Floor Stronghold of Security Task Module (`osrs_ee/bots/stronghold_module.py` — PR-13 / PR-15).
 
-Field-Verified OSRS Mechanics & Coordinates (`run_stronghold_bot.py` + `StrongholdScript.java`):
+Field-Verified OSRS Mechanics & Coordinates (`run_stronghold_bot.py` + `StrongholdScript.java` + Live Run 1/2):
 - Pure tick-driven `TaskModule` with ZERO transport, socket, sleep, or safety imports (`ADR-012`).
+- Autonomous Pre-Flight Food & Bank Staging (`PR-15` Req #2):
+  1. Verifies inventory holds `>= min_required_food` (default `6`) verified un-noted food items on `SURFACE`
+     before descending into `BARBARIAN_VILLAGE` (`id=20790`).
+  2. Automatically visits the nearest safe surface bank (`DRAYNOR_BANK`, `VARROCK_WEST_BANK`, or
+     `GRAND_EXCHANGE`) and withdraws up to `target_food_count` (default `10`) food items.
+  3. Zero-Touch Fallback: if the bank holds `< min_required_food` food (e.g., fresh post-Tutorial account),
+     autonomously nets Shrimps at `LUMBRIDGE_SWAMP_FISHING` (claiming a free `Small fishing net` `303` from
+     `Fishing tutor` if needed) and cooks them on the open-air permanent `Fire` at `BARBARIAN_RIVER_FIRE`
+     (`(3106, 3432, 0)`, `270:14`, zero quest/door lock) right outside `BARBARIAN_VILLAGE`.
 - Surface Anchor: `GRAND_EXCHANGE` `(3164, 3487, 0)` <-> Entrance `BARBARIAN_VILLAGE` `(3081, 3421, 0)` (`id=20790`).
-- All 4 underground floors reside on `plane=0` (`y >= 5000`) inside distinct region bounding boxes:
+- Streamlined `chebyshev_distance <= 2` Dungeon Object & Portal Passage (`PR-15` Req #4):
   1. Floor 1 (*Vault of War*, `1855..1935, 5180..5250`, `Varbit 2309`):
      - 4 `Gate of War` stages -> *Gift of Peace* (`id=20656`, `Open`, `2,000 GP`) -> Shortcut `20786` / Ladder `20785`.
   2. Floor 2 (*Catacomb of Famine*, `1980..2060, 5180..5250`, `Varbit 2310`):
      - 4 `Rickety door` stages -> *Grain of Plenty* (`id=19000`, `Search`, `3,000 GP`) -> Shortcut `19005` / Ladder `19004`.
   3. Floor 3 (*Pit of Pestilence*, `2110..2185, 5240..5315`, `Varbit 2311`):
-     - 3 `Oozing barrier` stages -> *Box of Health* (`id=23709`, `Open`, `5,000 GP`) -> Ladder `23706`.
+     - 3 `Oozing barrier` stages -> *Box of Health* (`id=23709`, `Open`, `5,000 GP`) -> Shortcut `23707` / Ladder `23706`.
   4. Floor 4 (*Sepulchre of Death*, `2300..2380, 5180..5260`, `Varbit 2312`):
-     - 4 `Portal of Death` stages -> *Cradle of Life* (`id=23731`, `Search`) -> Widget `270:15` (*Fancy boots*)
-     - Bone Chain exit (`id=23732`, `Climb-up` at `(2349, 5215, 0)`) via `AUTHORIZE_SURFACE_EXIT`.
+     - 4 `Portal of Death` stages (`chebyshev_distance <= 2` + `target_x/target_y` disambiguation)
+     - *Cradle of Life* (`id=23731`, `Search`) -> Widget `270:15` (*Fancy boots*)
+     - Shortcut `23922` / Bone Chain exit (`id=23732`, `Climb-up` at `(2349, 5215, 0)`) via `AUTHORIZE_SURFACE_EXIT`.
 - Post-Completion Homing: Routes back to `GRAND_EXCHANGE`, deposits `Fancy boots` (`9005`) + `Coins` (`995`),
   closes bank, and emits `COMPLETE_TASK`.
-- Bounded Claim / Modal Guards: Dismisses ladder warning modal (`579:17`) when needed and escalates cleanly via
-  `ESCALATE_HUMAN` if reward claiming is blocked (e.g., missing OSRS 2FA Authenticator) or out-of-order floor state.
 """
 
 from __future__ import annotations
+
+from typing import Any, Mapping
 
 from osrs_ee.ai.dialogue_solver import DeterministicStrongholdSolver
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TaskModule, TickContext
@@ -31,8 +41,10 @@ STRONGHOLD_REWARD_VARBITS: tuple[int, int, int, int] = (2309, 2310, 2311, 2312)
 ENTRANCE_ROCK_HOLE_ID = 20790
 LADDER_WARNING_WIDGET = {"groupId": 579, "childId": 17}
 FANCY_BOOTS_WIDGET = {"groupId": 270, "childId": 15}
+COOK_ALL_WIDGET = {"groupId": 270, "childId": 14}
 FANCY_BOOTS_ITEM_ID = 9005
 COINS_ITEM_ID = 995
+SMALL_FISHING_NET_ID = 303
 
 FLOOR_1_REWARD_CHEST_ID = 20656     # Gift of Peace (Open)
 FLOOR_1_SHORTCUT_PORTAL_ID = 20786  # Use
@@ -44,10 +56,38 @@ FLOOR_2_SHORTCUT_PORTAL_ID = 19005  # Use
 FLOOR_2_LADDER_DOWN_ID = 19004      # Climb-down
 
 FLOOR_3_REWARD_CHEST_ID = 23709     # Box of Health (Open)
+FLOOR_3_SHORTCUT_PORTAL_ID = 23707  # Use
 FLOOR_3_LADDER_DOWN_ID = 23706      # Climb-down
 
 FLOOR_4_CRADLE_ID = 23731           # Cradle of Life (Search)
+FLOOR_4_SHORTCUT_PORTAL_ID = 23922  # Use
 FLOOR_4_BONE_CHAIN_UP_ID = 23732    # Bone Chain exit to Surface (Climb-up)
+
+# Priority-ordered verified single-click edible F2P food names (kept local to honor ADR-012 isolation)
+PRIORITY_EDIBLE_FOOD_NAMES: tuple[str, ...] = (
+    "swordfish",
+    "lobster",
+    "tuna",
+    "salmon",
+    "pike",
+    "trout",
+    "herring",
+    "sardine",
+    "bread",
+    "cooked meat",
+    "cooked chicken",
+    "anchovies",
+    "shrimps",
+    "cabbage",
+)
+EDIBLE_FOOD_SET: frozenset[str] = frozenset(PRIORITY_EDIBLE_FOOD_NAMES)
+RAW_SWAMP_FISH_NAMES: frozenset[str] = frozenset({"raw shrimps", "raw anchovies"})
+
+SURFACE_BANK_COORDS: dict[str, WorldPoint] = {
+    "DRAYNOR_BANK": WorldPoint(3092, 3245, 0, "DRAYNOR_BANK"),
+    "VARROCK_WEST_BANK": WorldPoint(3185, 3436, 0, "VARROCK_WEST_BANK"),
+    "GRAND_EXCHANGE": WorldPoint(3164, 3487, 0, "GRAND_EXCHANGE"),
+}
 
 
 def classify_stronghold_region(pos: WorldPoint) -> str:
@@ -74,13 +114,28 @@ class StrongholdTaskModule(TaskModule):
         *,
         anchor_bank_node: str = "GRAND_EXCHANGE",
         max_claim_attempts: int = 6,
+        min_required_food: int = 6,
+        target_food_count: int = 10,
+        enable_fish_cook_fallback: bool = True,
     ) -> None:
         self._solver = DeterministicStrongholdSolver()
         self.anchor_bank_node = anchor_bank_node
         self.max_claim_attempts = max(2, int(max_claim_attempts))
+        self.min_required_food = max(0, int(min_required_food))
+        self.target_food_count = max(self.min_required_food, int(target_food_count))
+        self.enable_fish_cook_fallback = bool(enable_fish_cook_fallback)
+
         self._claim_attempts_by_floor: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
         self._cradle_searched_this_visit: bool = False
         self._pending_ladder_modal_floor: int | None = None
+
+        # Pre-flight surface food staging state
+        self._staging_bank_node: str | None = None
+        self._bank_food_exhausted: bool = False
+        self._staging_cook_phase: bool = False
+        self._awaiting_cook_widget: bool = False
+        self._last_gather_action_tick: int = -100
+        self._last_raw_fish_qty: int = 0
 
     @property
     def module_id(self) -> str:
@@ -89,6 +144,81 @@ class StrongholdTaskModule(TaskModule):
     @property
     def watched_varbits(self) -> tuple[int, ...]:
         return STRONGHOLD_REWARD_VARBITS
+
+    @staticmethod
+    def _count_edible_food(items: tuple[Mapping[str, Any], ...]) -> int:
+        total = 0
+        for it in items:
+            if bool(it.get("noted", False)):
+                continue
+            nm = str(it.get("name", "")).strip().casefold()
+            qty = int(it.get("quantity", 0))
+            if qty > 0 and nm in EDIBLE_FOOD_SET:
+                total += qty
+        return total
+
+    @staticmethod
+    def _count_raw_swamp_fish(items: tuple[Mapping[str, Any], ...]) -> int:
+        total = 0
+        for it in items:
+            if bool(it.get("noted", False)):
+                continue
+            nm = str(it.get("name", "")).strip().casefold()
+            iid = int(it.get("item_id", -1))
+            qty = int(it.get("quantity", 0))
+            if qty > 0 and (nm in RAW_SWAMP_FISH_NAMES or iid in (317, 321)):
+                total += qty
+        return total
+
+    @staticmethod
+    def _has_small_net(items: tuple[Mapping[str, Any], ...]) -> bool:
+        for it in items:
+            if bool(it.get("noted", False)):
+                continue
+            if (
+                int(it.get("item_id", -1)) == SMALL_FISHING_NET_ID
+                or str(it.get("name", "")).strip().casefold() == "small fishing net"
+            ) and int(it.get("quantity", 0)) > 0:
+                return True
+        return False
+
+    @staticmethod
+    def _estimate_free_slots(items: tuple[Mapping[str, Any], ...]) -> int:
+        used = 0
+        for it in items:
+            qty = int(it.get("quantity", 0))
+            if qty <= 0:
+                continue
+            is_stackable = (
+                bool(it.get("noted", False))
+                or int(it.get("item_id", 0)) == COINS_ITEM_ID
+                or str(it.get("name", "")).strip().casefold() == "coins"
+            )
+            used += 1 if is_stackable else qty
+        return max(0, 28 - used)
+
+    @staticmethod
+    def _select_best_bank_food(bank_items: tuple[Mapping[str, Any], ...]) -> Mapping[str, Any] | None:
+        rank_map = {nm: idx for idx, nm in enumerate(PRIORITY_EDIBLE_FOOD_NAMES)}
+        best: tuple[int, int, Mapping[str, Any]] | None = None
+        for it in bank_items:
+            if bool(it.get("noted", False)):
+                continue
+            nm = str(it.get("name", "")).strip().casefold()
+            qty = int(it.get("quantity", 0))
+            if qty > 0 and nm in rank_map:
+                cand = (rank_map[nm], -qty, it)
+                if best is None or (cand[0], cand[1]) < (best[0], best[1]):
+                    best = cand
+        return best[2] if best is not None else None
+
+    @staticmethod
+    def _choose_nearest_staging_bank(pos: WorldPoint) -> str:
+        if pos.y < 3380:
+            return "DRAYNOR_BANK"
+        if pos.y < 3462:
+            return "VARROCK_WEST_BANK"
+        return "GRAND_EXCHANGE"
 
     @staticmethod
     def _has_unbanked_loot(ctx: TickContext) -> bool:
@@ -105,8 +235,15 @@ class StrongholdTaskModule(TaskModule):
         return False
 
     @staticmethod
-    def _walk_or_pass_door(pos: WorldPoint, door_stand: WorldPoint, door_name: str, stage_label: str) -> TaskDirective:
-        if pos.chebyshev_distance(door_stand) > 1:
+    def _walk_or_pass_door(
+        pos: WorldPoint,
+        door_stand: WorldPoint,
+        door_name: str,
+        stage_label: str,
+        *,
+        max_dist: int = 2,
+    ) -> TaskDirective:
+        if pos.chebyshev_distance(door_stand) > max_dist:
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
                 destination=door_stand,
@@ -114,7 +251,12 @@ class StrongholdTaskModule(TaskModule):
             )
         return TaskDirective(
             directive_type=DirectiveType.INTERACT_OBJECT,
-            payload={"name": door_name, "action": "Pass-through"},
+            payload={
+                "name": door_name,
+                "action": "Pass-through",
+                "target_x": door_stand.x,
+                "target_y": door_stand.y,
+            },
             reason=f"{stage_label}: passing {door_name}",
         )
 
@@ -126,7 +268,7 @@ class StrongholdTaskModule(TaskModule):
         ladder_id: int,
         floor_num: int,
     ) -> TaskDirective:
-        if pos.chebyshev_distance(ladder_stand) > 1:
+        if pos.chebyshev_distance(ladder_stand) > 2:
             self._pending_ladder_modal_floor = None
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
@@ -157,7 +299,7 @@ class StrongholdTaskModule(TaskModule):
         action: str,
         label: str,
     ) -> TaskDirective:
-        if pos.chebyshev_distance(stand) > 1:
+        if pos.chebyshev_distance(stand) > 2:
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
                 destination=stand,
@@ -176,24 +318,273 @@ class StrongholdTaskModule(TaskModule):
             reason=f"Floor {floor_num}: claiming {label} (attempt {attempts}/{self.max_claim_attempts})",
         )
 
+    def _stage_preflight_food(self, ctx: TickContext, edible_qty: int) -> TaskDirective:
+        """Stage `>= min_required_food` (up to `target_food_count`) via nearest bank or Shrimp fish+cook."""
+        # Phase 1: Check nearest safe surface bank first
+        if not self._bank_food_exhausted:
+            if self._staging_bank_node is None:
+                self._staging_bank_node = self._choose_nearest_staging_bank(ctx.position)
+            bank_wp = SURFACE_BANK_COORDS.get(
+                self._staging_bank_node, SURFACE_BANK_COORDS["DRAYNOR_BANK"]
+            )
+            if ctx.position.chebyshev_distance(bank_wp) > 4:
+                return TaskDirective(
+                    directive_type=DirectiveType.NAVIGATE_TO,
+                    destination=self._staging_bank_node,
+                    reason=(
+                        f"Pre-flight food check ({edible_qty}/{self.min_required_food}); "
+                        f"routing safely to {self._staging_bank_node}"
+                    ),
+                )
+
+            if not ctx.bank_is_open:
+                return TaskDirective(
+                    directive_type=DirectiveType.BANK_TURNAROUND,
+                    payload={"open_only": True, "deposit_inventory": False},
+                    reason=f"Opening {self._staging_bank_node} to inspect food reserves",
+                )
+
+            free_slots = self._estimate_free_slots(ctx.inventory_items)
+            best_food = self._select_best_bank_food(ctx.bank_items)
+            if best_food is not None:
+                needed_for_min = max(1, self.min_required_food - edible_qty)
+                if free_slots < needed_for_min:
+                    return TaskDirective(
+                        directive_type=DirectiveType.BANK_TURNAROUND,
+                        payload={"deposit_inventory": True, "withdraw": [], "close_when_done": False},
+                        reason="Clearing non-food clutter in bank before withdrawing Stronghold food",
+                    )
+
+                food_id = int(best_food["item_id"])
+                food_name = str(best_food["name"])
+                avail = int(best_food["quantity"])
+                want_delta = max(1, min(free_slots, self.target_food_count - edible_qty))
+                take = min(avail, want_delta)
+                have_same = sum(
+                    int(i.get("quantity", 0))
+                    for i in ctx.inventory_items
+                    if not bool(i.get("noted", False))
+                    and (
+                        int(i.get("item_id", -1)) == food_id
+                        or str(i.get("name", "")).strip().casefold() == food_name.casefold()
+                    )
+                )
+                close_after = (edible_qty + take) >= self.min_required_food
+                return TaskDirective(
+                    directive_type=DirectiveType.BANK_TURNAROUND,
+                    payload={
+                        "deposit_inventory": False,
+                        "withdraw": [
+                            {
+                                "item_id": food_id,
+                                "name": food_name,
+                                "quantity": have_same + take,
+                            }
+                        ],
+                        "allow_best_effort": True,
+                        "close_when_done": close_after,
+                    },
+                    reason=(
+                        f"Withdrawing {take}x {food_name} for Stronghold survival "
+                        f"({edible_qty + take}/{self.target_food_count})"
+                    ),
+                )
+
+            # Bank holds no more verified food -> grab Small fishing net (303) if banked, then close bank
+            self._bank_food_exhausted = True
+            if (
+                self.enable_fish_cook_fallback
+                and not self._has_small_net(ctx.inventory_items)
+                and self._has_small_net(ctx.bank_items)
+                and free_slots >= 1
+            ):
+                return TaskDirective(
+                    directive_type=DirectiveType.BANK_TURNAROUND,
+                    payload={
+                        "deposit_inventory": False,
+                        "withdraw": [
+                            {
+                                "item_id": SMALL_FISHING_NET_ID,
+                                "name": "Small fishing net",
+                                "quantity": 1,
+                            }
+                        ],
+                        "allow_best_effort": True,
+                        "close_when_done": True,
+                    },
+                    reason="No food in bank; withdrawing Small fishing net (303) for autonomous Shrimp staging",
+                )
+            return TaskDirective(
+                directive_type=DirectiveType.BANK_TURNAROUND,
+                payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                reason="Bank food exhausted; closing bank to transition to autonomous Shrimp staging",
+            )
+
+        # Phase 2: Autonomous Zero-Touch Lumbridge Swamp Shrimp Netting + Barbarian River Fire Cooking
+        if not self.enable_fish_cook_fallback:
+            return TaskDirective(
+                directive_type=DirectiveType.ESCALATE_HUMAN,
+                reason=f"INSUFFICIENT_PREFLIGHT_FOOD:{edible_qty}<{self.min_required_food}",
+            )
+
+        if ctx.bank_is_open:
+            return TaskDirective(
+                directive_type=DirectiveType.BANK_TURNAROUND,
+                payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                reason="Closing bank before autonomous Shrimp staging",
+            )
+
+        raw_qty = self._count_raw_swamp_fish(ctx.inventory_items)
+        free_slots = self._estimate_free_slots(ctx.inventory_items)
+        desired_batch = max(self.min_required_food + 4, self.target_food_count + 2)
+
+        if raw_qty == 0:
+            self._staging_cook_phase = False
+            self._awaiting_cook_widget = False
+            # Guard against inventory clogged by burnt fish
+            if free_slots < 3:
+                vwb_wp = SURFACE_BANK_COORDS["VARROCK_WEST_BANK"]
+                if ctx.position.chebyshev_distance(vwb_wp) > 4:
+                    return TaskDirective(
+                        directive_type=DirectiveType.NAVIGATE_TO,
+                        destination="VARROCK_WEST_BANK",
+                        reason="Clearing burnt fish clutter at Varrock West Bank",
+                    )
+                return TaskDirective(
+                    directive_type=DirectiveType.BANK_TURNAROUND,
+                    payload={
+                        "deposit_inventory": True,
+                        "withdraw": [
+                            {"item_id": SMALL_FISHING_NET_ID, "name": "Small fishing net", "quantity": 1}
+                        ],
+                        "allow_best_effort": True,
+                        "close_when_done": True,
+                    },
+                    reason="Depositing burnt fish clutter while retaining Small fishing net",
+                )
+        elif (edible_qty + raw_qty) >= desired_batch or free_slots == 0:
+            self._staging_cook_phase = True
+
+        # Subphase 2A: Cook raw Shrimps on open-air Barbarian River permanent Fire (zero quest/door lock)
+        if self._staging_cook_phase and raw_qty > 0:
+            fire_wp = WorldPoint(3106, 3432, 0, "BARBARIAN_RIVER_FIRE")
+            if ctx.position.chebyshev_distance(fire_wp) > 4:
+                self._awaiting_cook_widget = False
+                return TaskDirective(
+                    directive_type=DirectiveType.NAVIGATE_TO,
+                    destination="BARBARIAN_RIVER_FIRE",
+                    reason=f"Routing with {raw_qty} raw fish to open-air Barbarian River Fire (3106, 3432)",
+                )
+
+            if raw_qty < self._last_raw_fish_qty:
+                # Active cooking batch in progress — do not interrupt!
+                self._last_raw_fish_qty = raw_qty
+                self._last_gather_action_tick = ctx.game_tick
+                self._awaiting_cook_widget = False
+                return TaskDirective(
+                    directive_type=DirectiveType.WAIT_NEXT_TICK,
+                    reason=f"Cooking Shrimps on Fire ({raw_qty} raw remaining, {edible_qty} cooked)",
+                )
+
+            if self._awaiting_cook_widget:
+                self._awaiting_cook_widget = False
+                self._last_raw_fish_qty = raw_qty
+                self._last_gather_action_tick = ctx.game_tick
+                return TaskDirective(
+                    directive_type=DirectiveType.CLICK_WIDGET,
+                    payload=dict(COOK_ALL_WIDGET),
+                    reason="Confirming Cook-All Shrimps widget (270:14)",
+                )
+
+            if (ctx.game_tick - self._last_gather_action_tick) < 5:
+                return TaskDirective(
+                    directive_type=DirectiveType.WAIT_NEXT_TICK,
+                    reason="Waiting for cooking cycle on Barbarian River Fire",
+                )
+
+            self._awaiting_cook_widget = True
+            self._last_raw_fish_qty = raw_qty
+            self._last_gather_action_tick = ctx.game_tick
+            return TaskDirective(
+                directive_type=DirectiveType.INTERACT_OBJECT,
+                payload={"name": "Fire", "action": "Cook"},
+                reason=f"Interacting with permanent Fire to cook {raw_qty} raw Shrimps",
+            )
+
+        # Subphase 2B: Claim free net (if needed) & net Shrimps at Lumbridge Swamp
+        fish_wp = WorldPoint(3243, 3152, 0, "LUMBRIDGE_SWAMP_FISHING")
+        if ctx.position.chebyshev_distance(fish_wp) > 5:
+            return TaskDirective(
+                directive_type=DirectiveType.NAVIGATE_TO,
+                destination="LUMBRIDGE_SWAMP_FISHING",
+                reason="Routing safely to Lumbridge Swamp to net Shrimps for Stronghold survival",
+            )
+
+        if not self._has_small_net(ctx.inventory_items):
+            if (ctx.game_tick - self._last_gather_action_tick) < 3:
+                return TaskDirective(
+                    directive_type=DirectiveType.WAIT_NEXT_TICK,
+                    reason="Waiting for Fishing tutor net dialogue",
+                )
+            self._last_gather_action_tick = ctx.game_tick
+            return TaskDirective(
+                directive_type=DirectiveType.INTERACT_NPC,
+                payload={"name": "Fishing tutor", "action": "Talk-to"},
+                reason="Claiming free Small fishing net (303) from Lumbridge Fishing tutor",
+            )
+
+        if raw_qty > self._last_raw_fish_qty:
+            # Active net-fishing animation catching fish — do not cancel!
+            self._last_raw_fish_qty = raw_qty
+            self._last_gather_action_tick = ctx.game_tick
+            return TaskDirective(
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
+                reason=f"Netting Shrimps ({raw_qty + edible_qty}/{desired_batch} gathered)",
+            )
+
+        if (ctx.game_tick - self._last_gather_action_tick) < 7:
+            return TaskDirective(
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
+                reason=f"Net fishing in progress ({raw_qty + edible_qty}/{desired_batch} gathered)",
+            )
+
+        self._last_raw_fish_qty = raw_qty
+        self._last_gather_action_tick = ctx.game_tick
+        return TaskDirective(
+            directive_type=DirectiveType.INTERACT_NPC,
+            payload={"name": "Fishing spot", "action": "Net"},
+            reason=f"Netting Shrimps at Lumbridge Swamp ({raw_qty + edible_qty}/{desired_batch})",
+        )
+
     def evaluate_tick(self, ctx: TickContext) -> TaskDirective:
-        # 1. Active Dialogue Handler (100% local deterministic 39-rule Stronghold solver)
+        region = classify_stronghold_region(ctx.position)
+
+        # 1. Active Dialogue Handler (100% local deterministic 39-rule Stronghold solver + surface tutor support)
         if ctx.dialogue_open:
             if ctx.dialogue_options:
                 ans = self._solver.solve(ctx.dialogue_question, list(ctx.dialogue_options))
-                if not ans.matched or ans.selected_option is None:
+                if ans.matched and ans.selected_option is not None:
                     return TaskDirective(
-                        directive_type=DirectiveType.ESCALATE_HUMAN,
-                        reason="UNRECOGNIZED_SECURITY_QUESTION",
+                        directive_type=DirectiveType.SELECT_DIALOGUE,
+                        payload={"option": ans.selected_option},
+                        reason=f"Answered Stronghold security gate ({ans.rule_id})",
                     )
+                if region == "SURFACE":
+                    for opt in ctx.dialogue_options:
+                        low = opt.casefold()
+                        if "net" in low or "shrimp" in low or "fish" in low or "yes" in low:
+                            return TaskDirective(
+                                directive_type=DirectiveType.SELECT_DIALOGUE,
+                                payload={"option": opt},
+                                reason="Selecting surface Fishing tutor option",
+                            )
                 return TaskDirective(
-                    directive_type=DirectiveType.SELECT_DIALOGUE,
-                    payload={"option": ans.selected_option},
-                    reason=f"Answered Stronghold security gate ({ans.rule_id})",
+                    directive_type=DirectiveType.ESCALATE_HUMAN,
+                    reason="UNRECOGNIZED_SECURITY_QUESTION",
                 )
             return TaskDirective(
                 directive_type=DirectiveType.CONTINUE_DIALOGUE,
-                reason="Advance Stronghold dialogue",
+                reason="Advance dialogue",
             )
 
         v1 = int(ctx.varbits.get(2309, 0))
@@ -202,14 +593,13 @@ class StrongholdTaskModule(TaskModule):
         v4 = int(ctx.varbits.get(2312, 0))
         all_claimed = v1 == 1 and v2 == 1 and v3 == 1 and v4 == 1
 
-        region = classify_stronghold_region(ctx.position)
         if region == "UNKNOWN_REGION":
             return TaskDirective(
                 directive_type=DirectiveType.ESCALATE_HUMAN,
                 reason=f"UNKNOWN_STRONGHOLD_REGION:({ctx.position.x},{ctx.position.y})",
             )
 
-        # 2. Surface Logic: Enter Barbarian Village hole OR home to Grand Exchange Bank & deposit loot
+        # 2. Surface Logic: Pre-flight food staging -> Enter Barbarian Village hole -> Home & bank loot
         if region == "SURFACE":
             self._cradle_searched_this_visit = False
             self._pending_ladder_modal_floor = None
@@ -235,6 +625,17 @@ class StrongholdTaskModule(TaskModule):
                     directive_type=DirectiveType.COMPLETE_TASK,
                     reason="All 4 Stronghold floors claimed and loot safely banked",
                 )
+
+            if self.min_required_food > 0:
+                edible_qty = self._count_edible_food(ctx.inventory_items)
+                if edible_qty < self.min_required_food:
+                    return self._stage_preflight_food(ctx, edible_qty)
+                if ctx.bank_is_open:
+                    return TaskDirective(
+                        directive_type=DirectiveType.BANK_TURNAROUND,
+                        payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                        reason=f"Pre-flight food staged ({edible_qty} items); closing bank to depart",
+                    )
 
             barb_wp = WorldPoint(3081, 3421, 0, "BARBARIAN_VILLAGE")
             if ctx.position.chebyshev_distance(barb_wp) > 2:
@@ -352,6 +753,12 @@ class StrongholdTaskModule(TaskModule):
                     label="Box of Health (5,000 GP)",
                 )
 
+            if px < 2135 and py < 5265:
+                return TaskDirective(
+                    directive_type=DirectiveType.INTERACT_OBJECT,
+                    payload={"id": FLOOR_3_SHORTCUT_PORTAL_ID, "action": "Use"},
+                    reason="Floor 3 reward already claimed; taking shortcut portal 23707",
+                )
             return self._descend_ladder_with_modal_support(
                 pos=ctx.position,
                 ladder_stand=WorldPoint(2147, 5284, 0),
@@ -369,15 +776,15 @@ class StrongholdTaskModule(TaskModule):
         if v4 == 0:
             if px >= 2352 and py <= 5231:
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2359, 5230, 0), "Portal of Death", "Floor 4 [1/4]")
-            if px >= 2352 and py >= 5232:
-                return self._walk_or_pass_door(ctx.position, WorldPoint(2359, 5234, 0), "Portal of Death", "Floor 4 [2/4]")
-            if px < 2352 and py >= 5226:
+            if px >= 2352 and 5232 <= py <= 5234:
+                return self._walk_or_pass_door(ctx.position, WorldPoint(2360, 5234, 0), "Portal of Death", "Floor 4 [2/4]")
+            if py >= 5235 or (px < 2352 and py >= 5226):
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2341, 5226, 0), "Portal of Death", "Floor 4 [3/4]")
             if px < 2352 and 5221 <= py <= 5225:
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2341, 5222, 0), "Portal of Death", "Floor 4 [4/4]")
 
             cradle_stand = WorldPoint(2343, 5215, 0)
-            if ctx.position.chebyshev_distance(cradle_stand) > 1:
+            if ctx.position.chebyshev_distance(cradle_stand) > 2:
                 return TaskDirective(
                     directive_type=DirectiveType.NAVIGATE_TO,
                     destination=cradle_stand,
@@ -407,9 +814,15 @@ class StrongholdTaskModule(TaskModule):
                 reason="Floor 4: clicking Fancy boots widget (270:15)",
             )
 
-        # v4 == 1 (all 4 rewards claimed!) -> climb up Bone Chain (23732) at (2349, 5215, 0)
+        # v4 == 1 (all 4 rewards claimed!) -> take shortcut 23922 if at entry, else climb Bone Chain (23732)
+        if px >= 2352:
+            return TaskDirective(
+                directive_type=DirectiveType.INTERACT_OBJECT,
+                payload={"id": FLOOR_4_SHORTCUT_PORTAL_ID, "action": "Use"},
+                reason="Floor 4 reward already claimed; taking shortcut portal 23922",
+            )
         chain_stand = WorldPoint(2349, 5215, 0)
-        if ctx.position.chebyshev_distance(chain_stand) > 1:
+        if ctx.position.chebyshev_distance(chain_stand) > 2:
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
                 destination=chain_stand,

@@ -106,13 +106,24 @@ class MicrobotHttpAdapter:
         self._cached_at_mono_ms: int = -1_000_000
         self._supports_skills_endpoint: bool = True
         self._supports_dialogue_endpoint: bool = True
+        self._supports_varp_run_endpoint: bool = True
+        self._supports_run_endpoint: bool = True
+        self._supports_objects_query_endpoint: bool = True
+        self._assumed_run_enabled: bool = False
         self.http_request_count = 0
         self.tcp_connect_count = 0
 
     def _get_or_open_conn(self) -> http.client.HTTPConnection:
         if self._conn is None:
+            import socket
+
             conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout_sec)
             conn.connect()
+            if conn.sock is not None:
+                try:
+                    conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
             self.tcp_connect_count += 1
             self._conn = conn
         return self._conn
@@ -252,7 +263,25 @@ class MicrobotHttpAdapter:
         resolved_curr = hp_curr if hp_curr is not None else resolved_max
         run_energy = _first_int(status.get("runEnergy"), player_obj.get("runEnergy"))
         resolved_run_energy = max(0, min(100, run_energy if run_energy is not None else 100))
-        run_enabled = bool(status.get("runEnabled", player_obj.get("runEnabled", False)))
+
+        if resolved_run_energy == 0:
+            self._assumed_run_enabled = False
+
+        # Ground-truth OSRS Run Mode: if `/state` omits `runEnabled` (upstream StateHandler.java),
+        # query VarPlayer 173 (`GET /varps?id=173` -> 1=ON, 0=OFF) so toggle widget 160:27 NEVER flip-flops!
+        if "runEnabled" in status or "runEnabled" in player_obj:
+            run_enabled = bool(status.get("runEnabled", player_obj.get("runEnabled", False)))
+            self._assumed_run_enabled = run_enabled
+        elif "loggedIn" in status or "player" in status:
+            varp_173 = self._fetch_optional_json("/varps?id=173", flag_attr="_supports_varp_run_endpoint")
+            if isinstance(varp_173, dict) and isinstance(varp_173.get("value"), int):
+                run_enabled = int(varp_173["value"]) == 1
+                self._assumed_run_enabled = run_enabled
+            else:
+                run_enabled = False
+        else:
+            run_enabled = False
+
         under_attack = bool(
             status.get(
                 "underAttack",
@@ -374,7 +403,16 @@ class MicrobotHttpAdapter:
             dlg_resp = self._fetch_optional_json("/dialogue", flag_attr="_supports_dialogue_endpoint")
             if isinstance(dlg_resp, dict):
                 self.last_dialogue_snapshot = dlg_resp
-                dialogue_open = bool(dlg_resp.get("inDialogue", dlg_resp.get("dialogueOpen", False)))
+                raw_in_dlg = bool(dlg_resp.get("inDialogue", dlg_resp.get("dialogueOpen", False)))
+                if "hasContinue" in dlg_resp or "hasOptions" in dlg_resp:
+                    # Exclude non-dialogue Make-X skill widgets (e.g. Cradle of Life boots 270:15)
+                    dialogue_open = raw_in_dlg and (
+                        bool(dlg_resp.get("hasContinue"))
+                        or bool(dlg_resp.get("hasOptions"))
+                        or bool(dlg_resp.get("options"))
+                    )
+                else:
+                    dialogue_open = raw_in_dlg
             else:
                 self.last_dialogue_snapshot = {}
                 dialogue_open = False
@@ -403,7 +441,18 @@ class MicrobotHttpAdapter:
         pin_open = bool(bank_resp.get("pinPromptOpen", False))
         if bank_open and not pin_open and isinstance(bank_resp.get("items"), list):
             bank_quality = "KNOWN"
-            bank_items = bank_resp["items"]
+            norm_bank: list[dict[str, Any]] = []
+            for bit in bank_resp["items"]:
+                if isinstance(bit, dict):
+                    norm_bank.append(
+                        {
+                            "item_id": int(bit["item_id"] if "item_id" in bit else bit.get("id", 0)),
+                            "name": str(bit.get("name", "Unknown")),
+                            "quantity": max(1, int(bit.get("quantity", 1))),
+                            "noted": bool(bit.get("noted", False)),
+                        }
+                    )
+            bank_items: list[dict[str, Any]] | None = norm_bank
         else:
             bank_quality = "UNKNOWN"
             bank_items = None
@@ -492,15 +541,32 @@ class MicrobotHttpAdapter:
                 )
             )
         if command_type == "SET_RUN_MODE":
-            try:
-                return _normalize_command_response(
-                    self._request_json("POST", "/run", {"enabled": bool(payload.get("enabled", True))})
-                )
-            except EndpointNotFoundError:
-                # Upstream AgentServerPlugin toggles run via Minimap Run Orb widget (160, 27)
-                return _normalize_command_response(
-                    self._request_json("POST", "/widgets/click", {"groupId": 160, "childId": 27})
-                )
+            desired = bool(payload.get("enabled", True))
+            if self._supports_run_endpoint:
+                try:
+                    res_run = self._request_json("POST", "/run", {"enabled": desired})
+                    self._assumed_run_enabled = desired
+                    return _normalize_command_response(res_run)
+                except EndpointNotFoundError:
+                    self._supports_run_endpoint = False
+
+            # Upstream AgentServerPlugin toggles run via Minimap Run Orb widget (160, 27).
+            # Check Varp 173 first so SET_RUN_MODE(enabled=True) is 100% idempotent and NEVER toggles Run OFF!
+            varp_173 = self._fetch_optional_json("/varps?id=173", flag_attr="_supports_varp_run_endpoint")
+            if isinstance(varp_173, dict) and isinstance(varp_173.get("value"), int):
+                currently_on = int(varp_173["value"]) == 1
+                self._assumed_run_enabled = currently_on
+                if currently_on == desired:
+                    return {"clicked": False, "alreadyEnabled": desired, "ok": True}
+            elif self._assumed_run_enabled == desired:
+                return {"clicked": False, "alreadyEnabled": desired, "ok": True}
+
+            res_orb = _normalize_command_response(
+                self._request_json("POST", "/widgets/click", {"groupId": 160, "childId": 27})
+            )
+            if res_orb.get("ok"):
+                self._assumed_run_enabled = desired
+            return res_orb
         if command_type == "WIDGET_CLICK":
             req_body: dict[str, Any] = {}
             if "groupId" in payload or "group_id" in payload:
@@ -513,7 +579,45 @@ class MicrobotHttpAdapter:
                 raise ValueError("WIDGET_CLICK requires ('groupId' and 'childId') or 'text'")
             return _normalize_command_response(self._request_json("POST", "/widgets/click", req_body))
         if command_type == "INTERACT_OBJECT":
-            return _normalize_command_response(self._request_json("POST", "/objects/interact", payload))
+            obj_body: dict[str, Any] = {
+                k: v for k, v in payload.items() if k not in ("target_x", "target_y")
+            }
+            if (
+                "id" not in obj_body
+                and isinstance(obj_body.get("name"), str)
+                and "target_x" in payload
+                and "target_y" in payload
+                and self._supports_objects_query_endpoint
+            ):
+                from urllib.parse import quote
+
+                tx, ty = int(payload["target_x"]), int(payload["target_y"])
+                q_name = quote(str(obj_body["name"]), safe="")
+                q_res = self._fetch_optional_json(
+                    f"/objects?name={q_name}&maxDistance=12",
+                    flag_attr="_supports_objects_query_endpoint",
+                )
+                if isinstance(q_res, dict) and isinstance(q_res.get("objects"), list):
+                    candidates: list[tuple[int, int, dict[str, Any]]] = []
+                    for idx, raw_o in enumerate(q_res["objects"]):
+                        if not isinstance(raw_o, dict):
+                            continue
+                        opos = raw_o.get("position")
+                        if isinstance(opos, dict) and "x" in opos and "y" in opos and "id" in raw_o:
+                            dist_target = max(abs(int(opos["x"]) - tx), abs(int(opos["y"]) - ty))
+                            candidates.append((dist_target, idx, raw_o))
+                    if candidates:
+                        candidates.sort(key=lambda item: (item[0], item[1]))
+                        best_dist, best_idx, best_obj = candidates[0]
+                        best_id = int(best_obj["id"])
+                        # Only bind by ID if no earlier (closer-to-player) object shares the exact same ID!
+                        shared_closer = any(
+                            int(other["id"]) == best_id and o_idx < best_idx
+                            for _d, o_idx, other in candidates[1:]
+                        )
+                        if best_dist <= 3 and not shared_closer:
+                            obj_body = {"id": best_id, "action": obj_body["action"]}
+            return _normalize_command_response(self._request_json("POST", "/objects/interact", obj_body))
         if command_type == "INTERACT_NPC":
             return _normalize_command_response(self._request_json("POST", "/npcs/interact", payload))
         if command_type == "DIALOGUE_SELECT":

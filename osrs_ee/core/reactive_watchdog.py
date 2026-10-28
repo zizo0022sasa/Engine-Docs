@@ -71,7 +71,7 @@ class ReactiveSafetyWatchdog:
         self,
         *,
         eat_hp_threshold: int = 7,
-        run_energy_min_threshold: int = 20,
+        run_energy_min_threshold: int = 15,
         eat_cooldown_ticks: int = 3,
         max_ticks_to_confirm_heal: int = 5,
     ) -> None:
@@ -87,6 +87,7 @@ class ReactiveSafetyWatchdog:
         self._last_eat_tick: int = -100
         self._pending_heal_from_tick: int | None = None
         self._hp_at_eat: int | None = None
+        self._food_qty_at_eat: int | None = None
 
     def authorize_surface_exit(self) -> None:
         self.surface_exit_authorized = True
@@ -139,16 +140,33 @@ class ReactiveSafetyWatchdog:
             self.surface_exit_authorized = False
         self.last_position = position
 
+        total_edible_qty = sum(
+            int(it.get("quantity", 0))
+            for it in inventory_items
+            if not bool(it.get("noted", False))
+            and str(it.get("name", "")).strip().casefold() in VERIFIED_EDIBLE_FOOD_NAMES
+            and int(it.get("quantity", 0)) > 0
+        )
+
+        effective_eat_threshold = (
+            max(self.eat_hp_threshold, 8) if (y >= 5000 or under_attack) else self.eat_hp_threshold
+        )
+
         # 3. Reactive next-tick confirmation of a previously pipelined Eat action!
         if self._pending_heal_from_tick is not None and self._hp_at_eat is not None:
-            if hp_current > self._hp_at_eat or hp_current >= hp_max:
-                # Heal confirmed on a subsequent game tick without ever pausing movement!
+            food_consumed = (
+                self._food_qty_at_eat is not None and total_edible_qty < self._food_qty_at_eat
+            )
+            if hp_current > self._hp_at_eat or hp_current >= hp_max or food_consumed:
+                # Heal or item consumption confirmed on a subsequent game tick without ever pausing movement!
                 self._pending_heal_from_tick = None
                 self._hp_at_eat = None
+                self._food_qty_at_eat = None
             elif (game_tick - self._pending_heal_from_tick) >= self.max_ticks_to_confirm_heal:
                 self._pending_heal_from_tick = None
                 self._hp_at_eat = None
-                if hp_current <= self.eat_hp_threshold:
+                self._food_qty_at_eat = None
+                if hp_current <= effective_eat_threshold:
                     return SafetyDecision(
                         verdict=SafetyVerdict.EAT_UNCONFIRMED_EVACUATE,
                         in_danger=True,
@@ -157,11 +175,10 @@ class ReactiveSafetyWatchdog:
                         detail="No HP increase observed after max game-tick confirmation window",
                     )
 
-        low_hp = hp_current <= self.eat_hp_threshold
+        low_hp = hp_current <= effective_eat_threshold
         in_danger = low_hp or under_attack
-        should_enable_run = (not run_enabled) and (
-            run_energy >= (10 if in_danger else self.run_energy_min_threshold)
-        )
+        min_run_gate = 5 if (in_danger or y >= 5000) else self.run_energy_min_threshold
+        should_enable_run = (not run_enabled) and (run_energy >= min_run_gate)
 
         # 4. If HP is above eat threshold, keep moving smoothly (toggling run non-blockingly if needed)
         if not low_hp:
@@ -208,6 +225,7 @@ class ReactiveSafetyWatchdog:
         self._last_eat_tick = game_tick
         self._pending_heal_from_tick = game_tick
         self._hp_at_eat = hp_current
+        self._food_qty_at_eat = total_edible_qty
 
         return SafetyDecision(
             verdict=SafetyVerdict.PIPELINED_EAT_AND_MOVE,

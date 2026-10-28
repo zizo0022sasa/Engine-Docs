@@ -67,6 +67,8 @@ class ExecutionEngineKernel:
         self.watchdog = watchdog or ReactiveSafetyWatchdog()
         self.navigation = navigation or NavigationEngine()
         self._last_seen_tick: int | None = None
+        self._internal_tick_counter: int = 0
+        self._session_run_bootstrapped: bool = False
 
     def _make_intent(
         self,
@@ -165,7 +167,18 @@ class ExecutionEngineKernel:
                 detail="Observation transitioned out of LOGGED_IN mid-poll; deferring cleanly",
             )
 
-        curr_tick = int(obs["game_tick"] or 0)
+        # PR-15 Req #3: Upstream StateHandler.java omits `gameTick` (`obs["game_tick"] is None`).
+        # Maintain a monotonic internal tick counter so `tick_advanced`, stall recovery, and 3-tick
+        # food cooldowns ALWAYS advance cleanly on live Microbot 8081!
+        raw_tick = obs.get("game_tick")
+        if isinstance(raw_tick, int) and raw_tick > 0:
+            curr_tick = raw_tick
+            if self._internal_tick_counter < curr_tick:
+                self._internal_tick_counter = curr_tick
+        else:
+            self._internal_tick_counter += 1
+            curr_tick = self._internal_tick_counter
+
         tick_advanced = self._last_seen_tick is None or curr_tick > self._last_seen_tick
         self._last_seen_tick = curr_tick
 
@@ -230,7 +243,11 @@ class ExecutionEngineKernel:
             )
             dispatched.append("CONSUME_FOOD")
 
-        if safety.enable_run:
+        # PR-15 Req #1: Auto-enable Run on session start, underground Floor 4, or when Watchdog requests it
+        in_sepulchre_floor_4 = 2300 <= pos_tuple[0] <= 2380 and pos_tuple[1] >= 5180
+        force_boot_run = (not self._session_run_bootstrapped or in_sepulchre_floor_4) and (not run_enabled_val) and (run_energy_val >= 5)
+        if safety.enable_run or force_boot_run:
+            self._session_run_bootstrapped = True
             self.gate.dispatch_pipelined_command(
                 intent=self._make_intent(
                     "SET_RUN_MODE",
@@ -239,6 +256,8 @@ class ExecutionEngineKernel:
                 )
             )
             dispatched.append("SET_RUN_MODE")
+        elif run_enabled_val:
+            self._session_run_bootstrapped = True
 
         # 4. Evaluate pure pluggable TaskModule (enriching dialogue, varbits, varps & metrics from live adapter)
         live_dlg = getattr(self.gate.adapter, "last_dialogue_snapshot", {}) or {}
@@ -419,6 +438,10 @@ class ExecutionEngineKernel:
             )
             return "BANK_PIN_REQUIRED"
 
+        # Allow a TaskModule to open the bank on Tick N and inspect live `ctx.bank_items` on Tick N+1!
+        if payload.get("open_only", False):
+            return None
+
         withdraw_specs: list[dict[str, Any]] = list(payload.get("withdraw") or [])
         required_ids = {int(w["item_id"]) for w in withdraw_specs if "item_id" in w}
         required_names = {str(w["name"]).strip().casefold() for w in withdraw_specs if "name" in w}
@@ -484,6 +507,8 @@ class ExecutionEngineKernel:
                 )
                 dispatched.append("BANK_WITHDRAW_ITEM")
                 if res["effect_status"] != "VERIFIED":
+                    if payload.get("allow_best_effort", False):
+                        return None
                     self.gate.store.close_session(
                         account_id=self.account_id,
                         session_id=self.session_id,

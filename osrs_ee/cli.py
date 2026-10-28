@@ -218,8 +218,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         store.close()
 
 
-def _resolve_task_module(recipe_id: str) -> TaskModule:
-    return BotModuleRegistry().create(recipe_id)
+def _resolve_task_module(recipe_id: str, *, min_required_food: int | None = None) -> TaskModule:
+    return BotModuleRegistry().create(recipe_id, min_required_food=min_required_food)
 
 
 def _read_agent_token_file(token_file: str | None) -> str:
@@ -347,7 +347,10 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             session_epoch=lease["session_epoch"],
             capabilities=caps,
         )
-        task_mod = _resolve_task_module(args.recipe_id)
+        task_mod = _resolve_task_module(
+            args.recipe_id,
+            min_required_food=getattr(args, "require_food_count", None),
+        )
         stop_event = threading.Event()
         max_ticks = max(1, int(args.max_ticks))
         ticks_run = 0
@@ -659,7 +662,10 @@ def _cmd_simulate_pilot(args: argparse.Namespace) -> int:
                 session_epoch=lease["session_epoch"],
                 tutorial_varp_281=1000,
                 skills={"hitpoints": 10, "agility": 1, "woodcutting": 35},
-                bank_items=[{"item_id": 1359, "name": "Rune axe", "quantity": 1, "noted": False}],
+                bank_items=[
+                    {"item_id": 1359, "name": "Rune axe", "quantity": 1, "noted": False},
+                    {"item_id": 333, "name": "Trout", "quantity": 12, "noted": False},
+                ],
             )
             if args.recipe_id == "stage2_stronghold_10k":
                 fa.position = {"x": 3164, "y": 3487, "plane": 0}
@@ -1007,7 +1013,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_att.add_argument("--agility", type=int, default=1)
     p_att.add_argument("--combat-level", type=int, default=3)
     p_att.add_argument("--member", action="store_true")
-    p_att.add_argument("--max-ticks", type=int, default=2500)
+    p_att.add_argument(
+        "--require-food-count",
+        type=int,
+        default=6,
+        help="Minimum verified food count to stage before entering Stronghold (default: 6; 0 disables)",
+    )
+    p_att.add_argument("--max-ticks", type=int, default=3500)
     p_att.add_argument("--tick-interval-sec", type=float, default=0.6)
     p_att.add_argument("--quiet", action="store_true", help="Suppress live per-tick stderr telemetry")
 

@@ -37,9 +37,11 @@ class BotModuleRegistry:
     def list_registered_ids(self) -> tuple[str, ...]:
         return tuple(self._factories.keys())
 
-    def create(self, recipe_id: str) -> TaskModule:
+    def create(self, recipe_id: str, *, min_required_food: int | None = None) -> TaskModule:
         if recipe_id in QUARANTINED_CONCEPT_RECIPES:
             raise PermissionError(f"Recipe {recipe_id!r} is QUARANTINED (CONCEPT_ONLY) under ADR-006")
         if recipe_id not in self._factories:
             raise KeyError(f"Unregistered bot module recipe_id (Default-Deny): {recipe_id!r}")
+        if recipe_id == "stage2_stronghold_10k" and min_required_food is not None:
+            return StrongholdTaskModule(min_required_food=int(min_required_food))
         return self._factories[recipe_id]()

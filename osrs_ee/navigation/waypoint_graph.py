@@ -103,12 +103,19 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "LUMBRIDGE_WEST_TREES": WorldPoint(3190, 3245, 0, "LUMBRIDGE_WEST_TREES"),
     "LUMBRIDGE_SHEEP_FARM": WorldPoint(3190, 3273, 0, "LUMBRIDGE_SHEEP_FARM"),
     "LUMBRIDGE_SWAMP_FISHING": WorldPoint(3243, 3152, 0, "LUMBRIDGE_SWAMP_FISHING"),
+    "BARBARIAN_RIVER_FIRE": WorldPoint(3106, 3432, 0, "BARBARIAN_RIVER_FIRE"),
     "GOBLIN_VILLAGE": WorldPoint(2958, 3512, 0, "GOBLIN_VILLAGE"),
 }
 
 
 def _build_default_edges() -> tuple[GraphEdge, ...]:
     bidirectional_specs: list[dict[str, Any]] = [
+        {
+            "edge_id": "safe_bridge_to_barbarian_river_fire",
+            "src": "GUNNARSGRunn_BRIDGE_EAST",
+            "dst": "BARBARIAN_RIVER_FIRE",
+            "cost_tiles": 13.0,
+        },
         # --- GATED SHORTCUT: GE Underwall Tunnel (3149, 3480) requires Agility 21 + Members! ---
         {
             "edge_id": "shortcut_ge_underwall_agility_21",
@@ -564,24 +571,36 @@ class NavigationEngine:
             prog.stalled_ticks_on_segment = 0
             target_wp = prog.plan.waypoints[prog.current_index]
 
-        # Detect stalled ticks against an obstacle
+        # Detect stalled ticks when stationary on the exact same tile
         if tick_advanced and prog.last_observed_pos is not None:
-            prev_dist = prog.last_observed_pos.chebyshev_distance(target_wp)
-            curr_dist = current_pos.chebyshev_distance(target_wp)
-            if curr_dist >= prev_dist and prog.last_dispatched_index == prog.current_index:
+            stationary = (
+                current_pos.x == prog.last_observed_pos.x
+                and current_pos.y == prog.last_observed_pos.y
+                and current_pos.plane == prog.last_observed_pos.plane
+            )
+            if stationary and prog.last_dispatched_index == prog.current_index:
                 prog.stalled_ticks_on_segment += 1
             else:
                 prog.stalled_ticks_on_segment = 0
         prog.last_observed_pos = current_pos
 
         if prog.stalled_ticks_on_segment >= self.max_stalled_ticks_before_reroute:
-            edge_idx = max(0, min(prog.current_index - 1, len(prog.plan.traversed_edges) - 1))
             if prog.plan.traversed_edges:
+                edge_idx = max(0, min(prog.current_index - 1, len(prog.plan.traversed_edges) - 1))
                 jammed_edge = prog.plan.traversed_edges[edge_idx]
-                self._blacklisted_edges_by_account.setdefault(capabilities.account_id, set()).add(jammed_edge)
-            self.start_route(origin=current_pos, destination=destination, capabilities=capabilities)
-            prog = self._active_progress[capabilities.account_id]
-            target_wp = prog.plan.waypoints[prog.current_index]
+                acct_blocked = self._blacklisted_edges_by_account.setdefault(capabilities.account_id, set())
+                acct_blocked.add(jammed_edge)
+                try:
+                    self.start_route(origin=current_pos, destination=destination, capabilities=capabilities)
+                    prog = self._active_progress[capabilities.account_id]
+                    target_wp = prog.plan.waypoints[prog.current_index]
+                except NoSafeRouteError:
+                    # Single safe Level-3 corridor has no alternate path -> keep edge & re-dispatch walk!
+                    acct_blocked.discard(jammed_edge)
+                    prog.stalled_ticks_on_segment = 1
+            else:
+                # Direct 2-point dungeon micro-route -> keep stalled > 0 so `/walk` immediately re-fires!
+                prog.stalled_ticks_on_segment = 1
 
         if prog.last_dispatched_index != prog.current_index or prog.stalled_ticks_on_segment > 0:
             prog.last_dispatched_index = prog.current_index

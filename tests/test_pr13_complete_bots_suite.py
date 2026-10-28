@@ -120,6 +120,7 @@ def test_t40_full_4_floor_stronghold_traversal_security_cache_widgets_and_ge_ban
     """
     store, adapter, _gate, kernel = _make_kernel_env(
         tmp_path / "stronghold_full",
+        bank_items=[{"item_id": 333, "name": "Trout", "quantity": 12, "noted": False}],
         inventory_items=[{"item_id": 333, "name": "Trout", "quantity": 2, "noted": False}],
     )
     bot = StrongholdTaskModule()

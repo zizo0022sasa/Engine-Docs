@@ -73,7 +73,7 @@ def _setup_leased_gate(tmp_path: Path, account_id: str = "acc_01") -> tuple[Stat
         session_id=lease["session_id"],
         session_epoch=lease["session_epoch"],
         inventory_items=[
-            {"item_id": 333, "name": "Trout", "quantity": 3, "noted": False},
+            {"item_id": 333, "name": "Trout", "quantity": 7, "noted": False},
         ],
     )
     gate = GameAdapterGate(store, adapter)

@@ -6,17 +6,15 @@
 
 ## 1. الحالة الراهنة للمشروع (`Current Snapshot`)
 
-* **المرحلة الحالية:** **اكتمال النواة السلكية (`PR-12.1` / `783a735`) + منظومة البوتات المعزولة الكاملة (`PR-13` / `c664c81`) + ربط وتجهيز بوابة التليجرام الحية (`@orangeconnebot`) ومسار استيراد الحسابات المشفر (`PR-14`)**.
+* **المرحلة الحالية:** **اكتمال معالجات التشغيل الذاتي الكامل دون لمس العميل (`PR-15`: التفعيل الذاتي للجري عبر `Varp 173` + `160:27`، التجهيز التلقائي للطعام من البنك أو الصيد والطهي قبل نزول `Stronghold`، العداد الرتيب الداخلي لنبضات `game_tick` عند غياب `gameTick` من `/state`، واجتياز بوابات الطابق الرابع بمدى `chebyshev_distance <= 2` مع حسم معرفات الأبواب المزدوجة)** تمهيداً لـ **الجولة الحية الثالثة (`Live Run 3`)** على `acc_02` (`zaza266`).
 * **نتيجة فحص الأسرار (`Secret Scan`):** `[SECRET_SCAN_OK] Zero secret patterns detected under .`
-* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`52 passed` (0 failed)** عبر 15 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T46`.
+* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`56 passed` (0 failed)** عبر 16 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T50`.
 * **التمييز المعرفي الدقيق (`Epistemic Status`):**
-  * **`LIVE_WIRE_VERIFIED` (على عميل `microbot-2.6.34.jar` الحي — `127.0.0.1:8081` عند الكوميت `390419c`):**
-    1. استجابة `GET /state` الافتراضية في `<10ms` بدون أي خطأ `404` (`{'reachable': True, 'logged_in': False, 'login_state': 'LOGIN_SCREEN'}`).
-    2. ثبات اتصال `HTTP/1.1 Keep-Alive` بمقبس وحيد (`TCP connects: 1 | HTTP requests: 2`) واختصار شاشة الدخول دون أي استعلامات عبثية للحقيبة أو البنك.
-    3. نجاح توجيه وتطبيع `WIDGET_CLICK` عبر `POST /widgets/click` حياً بدون `PolicyDeniedError`.
-    4. نجاح السقوط التلقائي لأمر `SET_RUN_MODE` عند رجوع `404` من `/run` إلى نقر أيقونة الجري `160:27` عبر `/widgets/click` بامتياز.
-  * **`HERMETIC_VERIFIED`:** جميع المحركات، العقود، قواعد `SQLite WAL`، خزنة الأسرار `0600`، خادم التحويل المحلي `LocalSocks5Sidecar`، العزل، مشرف الجلسة، حلال الحوارات، مستشار الـ AI، بوابة التليجرام وحارس `<500MB`، حاسبة `RSS` وبوابة `Canary`، دفتر البورصة `GEOrderLedger`، وواجهة `CLI` محققة آلياً بالكامل (`45 passed`).
-  * **`PENDING_IN_GAME_SCRIPT_PHASE`:** جلسات اللعب الكاملة داخل العالم (`IN_GAME`) واستكمال سكربتات المهام التفصيلية (مثل الطوابق الأربعة الكاملة لـ `StrongholdTaskModule` وما يليها من مهام `osrs_ee/bots/`).
+  * **`LIVE_WIRE_VERIFIED` (على عميل `microbot-2.6.34.jar` الحي — `127.0.0.1:8081` + تشغيل حي داخل عالم OSRS على `acc_02` في Run 1 & Run 2):**
+    1. استجابة `GET /state` في `<10ms` وثبات `HTTP/1.1 Keep-Alive`، وبوابة التليجرام الحية `@orangeconnebot` (`/status`).
+    2. اجتياز الممر الآمن السطحي (`402` بلاطة: `Lumbridge -> Draynor -> Champions Bypass -> Varrock West -> Barbarian Village`) بنقاط حياة `10/10`، نزول فتحة الكهف `20790`، تخطي الطابقين 1 و2 ببوابتي الاختصار `20786` و`19005`، نزول السلالم `20785`/`19004`/`23706` وتأكيد نافذة التحذير `579:17`، دخول الطابق الرابع واجتياز `Portal of Death [1/4]` وحل سؤال الأمان، وعزل الموت نظيفاً تحت `DEATH_QUARANTINE`.
+  * **`HERMETIC_VERIFIED`:** حزمة `PR-15` الكاملة (`T47..T50` في `test_pr15_stronghold_live_hardening.py`) لإغلاق جذور توقف الطابق الرابع في Run 1 & Run 2 (`56 passed`).
+  * **`PENDING_LIVE_RUN_3`:** التحقق الميداني الحي للجولة الثالثة (`Live Run 3`) لإتمام سحب `Fancy boots` (`270:15`) من `Cradle of Life` (`23731`)، الصعود عبر `Bone chain` (`23732`)، وإيداع الغنائم في بنك `GRAND_EXCHANGE`.
 
 ---
 
@@ -38,7 +36,8 @@
 | **`PR-12`** | `ade6240` | المعالجة الجذرية للعيوب الميدانية الأربعة (`AUD-36..39` / `ADR-009..012`): `ReactiveSafetyWatchdog` بدون انتظار ساكن، `ConstrainedWaypointGraph` لممرات المستوى 3 الآمنة، `SessionLifecycleManager` بالإنعاش الذاتي، وفصل `ExecutionEngineKernel` عن `osrs_ee/bots/`. | `42 passed` (`T01..T36`) |
 | **`PR-12.1`** | `390419c` / `783a735` | إغلاق فجوات التوافق السلكي الثلاث مع عميل Microbot الحي (`AUD-40..42` / `ADR-013`): تطبيع نقاط الحياة ضد `None` (`hitpoints/maxHitpoints` + `/skills?name=Hitpoints`)، دعم `WIDGET_CLICK -> POST /widgets/click`، واعتماد `status_endpoint="/state"` افتراضياً مع سقوط تلقائي ذكي لـ `/status` — **ومعتمد بشهادة فحص سلكي حي على `microbot-2.6.34.jar` (`127.0.0.1:8081`)**. | `45 passed` (`T01..T39`) |
 | **`PR-13`** | `c664c81` | بناء واستكمال الوحدات السبع المعتمدة في `osrs_ee/bots/` (`StrongholdTaskModule` 4 طوابق كاملة + 39 سؤالاً + `270:15` + إيداع البنك، `TutorialIslandTaskModule`، `TradeUnlockQuestsTaskModule` 12 QP، `TotalLevel100TaskModule`، `SkillingGathererTaskModule` لـ 3 دورات، و`BotModuleRegistry`) مع أوامر `live-probe` و`attach-bot`. | `50 passed` (`T01..T44`) |
-| **`PR-14`** | *(تجهيز الأسطول وبوابة التليجرام الحية)* | محمل `.env` قياسي، تفعيل فحص واستطلاع التليجرام الحي (`telegram-check` و`telegram-poll` على `@orangeconnebot` مع فلتر `ALLOWED_CHAT_IDS` ودعم `/status@bot`)، وتحصين `ingest --file accounts.txt` ضد التكرار. | **`52 passed`** (`T01..T46`) |
+| **`PR-14`** | `37072a3` / `7ed863c` / `a2709e2` | محمل `.env` قياسي، تفعيل `@orangeconnebot` الحي، دعم `DIRECT` في `LocalSocks5Sidecar`، بث سجلات النبضات الحية في `attach-bot`، وإثبات محاكاة الطوابق الأربعة في `simulate-pilot`. | `52 passed` (`T01..T46`) |
+| **`PR-15`** | *(التحصين الميداني لـ Stronghold Run 3)* | تفعيل الجري الذاتي غير المتذبذب (`Varp 173` + `160:27`)، التجهيز التلقائي للطعام قبل المغامرة (`DRAYNOR_BANK` + سقوط تلقائي لصيد وطهي الجمبري عند خلو البنك + تطبيع `bank.items`)، العداد الرتيب الداخلي عند `game_tick is None`، وتوسيع مدى عبور بوابات الطابق الرابع إلى `chebyshev_distance <= 2` مع حسم معرف الباب الأمامي (`23728` مقابل `23727`) وفلتر `Widget 270`. | **`56 passed`** (`T01..T50`) |
 
 ---
 
