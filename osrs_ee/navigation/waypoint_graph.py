@@ -111,10 +111,16 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
 def _build_default_edges() -> tuple[GraphEdge, ...]:
     bidirectional_specs: list[dict[str, Any]] = [
         {
-            "edge_id": "safe_bridge_to_barbarian_river_fire",
+            "edge_id": "safe_bridge_east_to_barbarian_river_fire",
             "src": "GUNNARSGRunn_BRIDGE_EAST",
             "dst": "BARBARIAN_RIVER_FIRE",
-            "cost_tiles": 13.0,
+            "cost_tiles": 14.0,
+        },
+        {
+            "edge_id": "safe_barbarian_river_fire_to_stronghold_entrance",
+            "src": "BARBARIAN_RIVER_FIRE",
+            "dst": "BARBARIAN_VILLAGE",
+            "cost_tiles": 26.0,
         },
         # --- GATED SHORTCUT: GE Underwall Tunnel (3149, 3480) requires Agility 21 + Members! ---
         {
@@ -468,11 +474,13 @@ class NavigationEngine:
         graph: ConstrainedWaypointGraph | None = None,
         *,
         lookahead_tiles: int = 4,
-        max_stalled_ticks_before_reroute: int = 3,
+        max_stalled_ticks_before_reroute: int = 5,
+        walk_redispatch_cooldown_ticks: int = 5,
     ) -> None:
         self.graph = graph or ConstrainedWaypointGraph()
         self.lookahead_tiles = lookahead_tiles
-        self.max_stalled_ticks_before_reroute = max_stalled_ticks_before_reroute
+        self.max_stalled_ticks_before_reroute = max(2, int(max_stalled_ticks_before_reroute))
+        self.walk_redispatch_cooldown_ticks = max(3, int(walk_redispatch_cooldown_ticks))
         self._blacklisted_edges_by_account: dict[str, set[str]] = {}
         self._active_progress: dict[str, NavigationProgress] = {}
 
@@ -584,7 +592,19 @@ class NavigationEngine:
                 prog.stalled_ticks_on_segment = 0
         prog.last_observed_pos = current_pos
 
-        if prog.stalled_ticks_on_segment >= self.max_stalled_ticks_before_reroute:
+        force_redispatch = False
+        effective_cooldown = (
+            min(3, self.walk_redispatch_cooldown_ticks)
+            if current_pos.y >= 5000
+            else self.walk_redispatch_cooldown_ticks
+        )
+        stall_gate = (
+            min(self.max_stalled_ticks_before_reroute, effective_cooldown)
+            if not prog.plan.traversed_edges
+            else self.max_stalled_ticks_before_reroute
+        )
+
+        if prog.stalled_ticks_on_segment >= stall_gate:
             if prog.plan.traversed_edges:
                 edge_idx = max(0, min(prog.current_index - 1, len(prog.plan.traversed_edges) - 1))
                 jammed_edge = prog.plan.traversed_edges[edge_idx]
@@ -595,14 +615,19 @@ class NavigationEngine:
                     prog = self._active_progress[capabilities.account_id]
                     target_wp = prog.plan.waypoints[prog.current_index]
                 except NoSafeRouteError:
-                    # Single safe Level-3 corridor has no alternate path -> keep edge & re-dispatch walk!
+                    # Single safe corridor (or bridge crossing): keep edge, reset stall counter to 0,
+                    # and re-dispatch `/walk` ONLY after full debounce window (>= 5 surface ticks = 3.0s)
+                    # so WebWalker is NEVER interrupted every 0.6s!
                     acct_blocked.discard(jammed_edge)
-                    prog.stalled_ticks_on_segment = 1
-            else:
-                # Direct 2-point dungeon micro-route -> keep stalled > 0 so `/walk` immediately re-fires!
-                prog.stalled_ticks_on_segment = 1
+                    if prog.stalled_ticks_on_segment >= effective_cooldown:
+                        prog.stalled_ticks_on_segment = 0
+                        force_redispatch = True
+            elif prog.stalled_ticks_on_segment >= effective_cooldown:
+                # Direct 2-point micro-route: debounce `/walk` re-dispatch so WebWalker finishes computing!
+                prog.stalled_ticks_on_segment = 0
+                force_redispatch = True
 
-        if prog.last_dispatched_index != prog.current_index or prog.stalled_ticks_on_segment > 0:
+        if prog.last_dispatched_index != prog.current_index or force_redispatch:
             prog.last_dispatched_index = prog.current_index
             return {
                 "x": target_wp.x,

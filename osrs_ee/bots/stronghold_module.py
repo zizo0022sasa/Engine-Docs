@@ -134,6 +134,7 @@ class StrongholdTaskModule(TaskModule):
         self._bank_food_exhausted: bool = False
         self._staging_cook_phase: bool = False
         self._awaiting_cook_widget: bool = False
+        self._cook_object_clicked_tick: int = -100
         self._last_gather_action_tick: int = -100
         self._last_raw_fish_qty: int = 0
 
@@ -320,6 +321,13 @@ class StrongholdTaskModule(TaskModule):
 
     def _stage_preflight_food(self, ctx: TickContext, edible_qty: int) -> TaskDirective:
         """Stage `>= min_required_food` (up to `target_food_count`) via nearest bank or Shrimp fish+cook."""
+        raw_qty = self._count_raw_swamp_fish(ctx.inventory_items)
+        # Resume-aware shortcut: if inventory ALREADY holds enough raw+cooked fish (e.g. restarted at bridge
+        # with 11x Raw shrimps), go straight to cooking at BARBARIAN_RIVER_FIRE without backtracking to bank!
+        if raw_qty > 0 and (edible_qty + raw_qty) >= self.min_required_food and not ctx.bank_is_open:
+            self._bank_food_exhausted = True
+            self._staging_cook_phase = True
+
         # Phase 1: Check nearest safe surface bank first
         if not self._bank_food_exhausted:
             if self._staging_bank_node is None:
@@ -465,10 +473,10 @@ class StrongholdTaskModule(TaskModule):
         elif (edible_qty + raw_qty) >= desired_batch or free_slots == 0:
             self._staging_cook_phase = True
 
-        # Subphase 2A: Cook raw Shrimps on open-air Barbarian River permanent Fire (zero quest/door lock)
+        # Subphase 2A: Cook raw Shrimps on open-air Barbarian River permanent Fire (id=26185, zero quest/door lock)
         if self._staging_cook_phase and raw_qty > 0:
             fire_wp = WorldPoint(3106, 3432, 0, "BARBARIAN_RIVER_FIRE")
-            if ctx.position.chebyshev_distance(fire_wp) > 4:
+            if ctx.position.chebyshev_distance(fire_wp) > 2:
                 self._awaiting_cook_widget = False
                 return TaskDirective(
                     directive_type=DirectiveType.NAVIGATE_TO,
@@ -487,6 +495,12 @@ class StrongholdTaskModule(TaskModule):
                 )
 
             if self._awaiting_cook_widget:
+                # Give client 2 ticks (1.2s) after clicking Fire so Make-All chatbox widget 270:14 is open!
+                if (ctx.game_tick - self._cook_object_clicked_tick) < 2:
+                    return TaskDirective(
+                        directive_type=DirectiveType.WAIT_NEXT_TICK,
+                        reason="Waiting 1 tick for Cook Make-All widget (270:14) to open",
+                    )
                 self._awaiting_cook_widget = False
                 self._last_raw_fish_qty = raw_qty
                 self._last_gather_action_tick = ctx.game_tick
@@ -496,18 +510,19 @@ class StrongholdTaskModule(TaskModule):
                     reason="Confirming Cook-All Shrimps widget (270:14)",
                 )
 
-            if (ctx.game_tick - self._last_gather_action_tick) < 5:
+            if (ctx.game_tick - self._last_gather_action_tick) < 6:
                 return TaskDirective(
                     directive_type=DirectiveType.WAIT_NEXT_TICK,
                     reason="Waiting for cooking cycle on Barbarian River Fire",
                 )
 
             self._awaiting_cook_widget = True
+            self._cook_object_clicked_tick = ctx.game_tick
             self._last_raw_fish_qty = raw_qty
             self._last_gather_action_tick = ctx.game_tick
             return TaskDirective(
                 directive_type=DirectiveType.INTERACT_OBJECT,
-                payload={"name": "Fire", "action": "Cook"},
+                payload={"name": "Fire", "action": "Cook", "target_x": 3106, "target_y": 3432},
                 reason=f"Interacting with permanent Fire to cook {raw_qty} raw Shrimps",
             )
 
@@ -582,6 +597,10 @@ class StrongholdTaskModule(TaskModule):
                     directive_type=DirectiveType.ESCALATE_HUMAN,
                     reason="UNRECOGNIZED_SECURITY_QUESTION",
                 )
+            if region == "SURFACE" and self._staging_cook_phase:
+                # Level-up chatbox banner interrupted Cook-All -> reset timer so cooking resumes immediately!
+                self._awaiting_cook_widget = False
+                self._last_gather_action_tick = -100
             return TaskDirective(
                 directive_type=DirectiveType.CONTINUE_DIALOGUE,
                 reason="Advance dialogue",
@@ -628,7 +647,11 @@ class StrongholdTaskModule(TaskModule):
 
             if self.min_required_food > 0:
                 edible_qty = self._count_edible_food(ctx.inventory_items)
-                if edible_qty < self.min_required_food:
+                raw_pending = self._count_raw_swamp_fish(ctx.inventory_items)
+                still_cooking_batch = (
+                    self._staging_cook_phase and raw_pending > 0 and edible_qty < self.target_food_count
+                )
+                if edible_qty < self.min_required_food or still_cooking_batch:
                     return self._stage_preflight_food(ctx, edible_qty)
                 if ctx.bank_is_open:
                     return TaskDirective(

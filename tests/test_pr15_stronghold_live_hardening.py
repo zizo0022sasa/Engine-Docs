@@ -511,10 +511,13 @@ def test_t49_null_gametick_monotonic_progression_stall_recovery_and_ankou_eat_th
         adapter.read_observation = _null_tick_read  # type: ignore[method-assign]
         adapter.execute_raw_command = _sticky_walk_exec  # type: ignore[method-assign]
 
-        # Tick 1 dispatches walk #1 (blocked); ticks 2..4 detect stationary stall via synthetic tick counter -> walk #2 succeeds!
+        # Tick 1 dispatches walk #1 (blocked); ticks 2..5 stay 100% debounced (walk_attempts == 1);
+        # tick 6 re-dispatches walk #2 cleanly without NoSafeRouteError!
         for step in range(1, 6):
             kernel.step_tick(bot, now_monotonic=float(step))
-        assert walk_attempts >= 2, "Synthetic tick counter failed to trigger stationary walk re-dispatch!"
+        assert walk_attempts == 1, f"Walk re-dispatched too early during 5-tick debounce: {walk_attempts}"
+        kernel.step_tick(bot, now_monotonic=6.0)
+        assert walk_attempts == 2, f"Expected debounced walk #2 on tick 6, got {walk_attempts}"
         assert (adapter.position["x"], adapter.position["y"]) != (3222, 3218)
 
         # Now place player underground on Floor 4 (`y=5232 >= 5000`) at `8/10 HP` under Ankou attack!
@@ -788,3 +791,138 @@ def test_t50_live_run3_acc02_zaza266_full_rehearsal_floor4_chebyshev2_and_door_i
         http_ad.kill_process_tree()
         store.close()
         srv.server_close()
+
+
+def test_t51_barbarian_bridge_walk_debounce_fire_cooking_levelup_resume_and_direct_hole_entry(
+    tmp_path: Path,
+) -> None:
+    """PR-15.1 Field Remediation (Gunnarsgrunn Bridge Walk-Cancel Loop & Zero-Touch Fire Cooking):
+    1. Graph edges `safe_bridge_east_to_barbarian_river_fire` (14.0) and
+       `safe_barbarian_river_fire_to_stronghold_entrance` (26.0) exist and route directly from
+       `BARBARIAN_RIVER_FIRE (3106, 3432)` -> `BARBARIAN_VILLAGE (3081, 3421)` without crossing back East.
+    2. Even on a direct 2-point `WorldPoint` micro-route (`<= 20` tiles), `step_navigation_on_tick`
+       dispatches `/walk` ONCE and stays 100% silent for `walk_redispatch_cooldown_ticks` (5 ticks = 3.0s)
+       while `WebWalker` computes `1..19` across the bridge (ZERO 0.6s cancel-loop!).
+    3. Starting `zaza266` at `(3105, 3420)` with `1x Cooked meat` + `11x Raw shrimps` immediately routes to
+       `BARBARIAN_RIVER_FIRE (3106, 3432)` (no bank detour), crosses the bridge after a 3-tick WebWalker
+       delay without a single extra `/walk`, clicks `Fire` (`Cook`), waits 2 ticks for `Widget 270`,
+       clicks `270:14`, automatically dismisses & resumes across a Cooking Level-Up dialogue (`1 -> 2`),
+       cooks the full batch, and walks straight to Stronghold `20790`!
+    """
+    from osrs_ee.navigation.waypoint_graph import WorldPoint
+
+    # 1. Verify direct 2-point micro-route debounce (zero 0.6s walk spam!)
+    graph = ConstrainedWaypointGraph()
+    nav = NavigationEngine(graph)
+    caps = AccountCapabilitiesContext("acc_02", skills={"agility": 1, "hitpoints": 10}, combat_level=3)
+    p_bridge = WorldPoint(3105, 3420, 0)
+    p_fire = WorldPoint(3106, 3432, 0)
+
+    c1 = nav.step_navigation_on_tick(current_pos=p_bridge, tick_advanced=True, capabilities=caps, destination=p_fire)
+    assert c1 is not None and (c1["x"], c1["y"]) == (3106, 3432)
+    # Next 4 stationary ticks (2.4s while WebWalker calculates 1..19): MUST return None every tick!
+    for _ in range(4):
+        assert (
+            nav.step_navigation_on_tick(current_pos=p_bridge, tick_advanced=True, capabilities=caps, destination=p_fire)
+            is None
+        ), "NavigationEngine spammed `/walk` before 5-tick WebWalker debounce window!"
+    # 5th stalled tick (3.0s stationary): single clean re-dispatch, then silent again!
+    c6 = nav.step_navigation_on_tick(current_pos=p_bridge, tick_advanced=True, capabilities=caps, destination=p_fire)
+    assert c6 is not None
+    assert (
+        nav.step_navigation_on_tick(current_pos=p_bridge, tick_advanced=True, capabilities=caps, destination=p_fire)
+        is None
+    )
+
+    # Verify direct Fire -> Stronghold Entrance edge avoids backtracking through GUNNARSGRunn_BRIDGE_EAST (3105, 3420)
+    plan_fire_to_hole = graph.plan_safe_route(
+        origin="BARBARIAN_RIVER_FIRE",
+        destination="BARBARIAN_VILLAGE",
+        capabilities=caps,
+    )
+    assert [(wp.x, wp.y) for wp in plan_fire_to_hole.waypoints] == [(3106, 3432), (3081, 3421)]
+
+    # 2. Full end-to-end rehearsal starting from exact Live Run 3 bridge position (3105, 3420) with 11x Raw shrimps
+    store, adapter, _gate, kernel = _make_leased_fake_env(
+        tmp_path / "bridge_resume",
+        bank_items=[],
+        inventory_items=[
+            {"item_id": 2142, "name": "Cooked meat", "quantity": 1, "noted": False},
+            {"item_id": 317, "name": "Raw shrimps", "quantity": 11, "noted": False},
+        ],
+    )
+    try:
+        adapter.position = {"x": 3105, "y": 3420, "plane": 0}
+        bot = StrongholdTaskModule(min_required_food=6, target_food_count=10)
+
+        walk_targets: list[tuple[int, int]] = []
+        bridge_walk_started_tick: int | None = None
+        cooking_active = False
+        levelup_triggered = False
+        entered_stronghold_20790 = False
+        tick_counter = 0
+
+        orig_exec = adapter.execute_raw_command
+
+        def _sim_bridge_and_fire(cmd_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal bridge_walk_started_tick, cooking_active, entered_stronghold_20790
+            if cmd_type == "WALK_TO_WORLD_POINT":
+                tx, ty = int(payload["x"]), int(payload["y"])
+                walk_targets.append((tx, ty))
+                if (tx, ty) == (3106, 3432):
+                    # Simulate real WebWalker taking 3 stationary ticks to compute bridge path 1..19 before moving!
+                    bridge_walk_started_tick = tick_counter
+                    return {"ok": True}
+                return orig_exec(cmd_type, payload)
+
+            res = orig_exec(cmd_type, payload)
+            if cmd_type == "WIDGET_CLICK" and payload.get("groupId") == 270 and payload.get("childId") == 14:
+                cooking_active = True
+            elif cmd_type == "DIALOGUE_CONTINUE":
+                adapter.dialogue_open = False
+            elif cmd_type == "INTERACT_OBJECT" and payload.get("id") == 20790:
+                entered_stronghold_20790 = True
+            return res
+
+        adapter.execute_raw_command = _sim_bridge_and_fire  # type: ignore[method-assign]
+
+        for step in range(1, 50):
+            tick_counter = step
+            # After 3 stationary ticks on the bridge, WebWalker moves player smoothly to the Fire!
+            if bridge_walk_started_tick is not None and (step - bridge_walk_started_tick) == 3:
+                adapter.position = {"x": 3106, "y": 3432, "plane": 0}
+                bridge_walk_started_tick = None
+
+            # Simulate real gradual OSRS cooking (2-3 shrimps per cycle) + Cooking Level 1->2 interruption!
+            if cooking_active:
+                raw_entry = next(
+                    (it for it in adapter.inventory_items if str(it.get("name", "")).casefold() == "raw shrimps"),
+                    None,
+                )
+                if raw_entry is not None and raw_entry["quantity"] > 0:
+                    cook_now = min(3, int(raw_entry["quantity"]))
+                    raw_entry["quantity"] -= cook_now
+                    if raw_entry["quantity"] == 0:
+                        adapter.inventory_items.remove(raw_entry)
+                        cooking_active = False
+                    adapter._add_to_inventory(
+                        {"item_id": 315, "name": "Shrimps", "quantity": cook_now, "noted": False}
+                    )
+                    if not levelup_triggered:
+                        # 3 cooked shrimps = 90 XP >= 83 XP -> Cooking level 2 interrupts Cook-All!
+                        levelup_triggered = True
+                        cooking_active = False
+                        adapter.dialogue_open = True
+
+            kernel.step_tick(bot, now_monotonic=float(step))
+            if entered_stronghold_20790:
+                break
+
+        assert entered_stronghold_20790 is True, "Bot did not finish cooking and enter Stronghold 20790!"
+        # Must dispatch ONLY ONE `/walk` to (3106, 3432) and ONE direct `/walk` to (3081, 3421)!
+        assert walk_targets == [(3106, 3432), (3081, 3421)], f"Unexpected walk calls: {walk_targets}"
+        assert StrongholdTaskModule._count_raw_swamp_fish(tuple(adapter.inventory_items)) == 0
+        assert StrongholdTaskModule._count_edible_food(tuple(adapter.inventory_items)) >= 10
+    finally:
+        store.close()
+
