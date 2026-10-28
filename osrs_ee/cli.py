@@ -21,6 +21,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -293,16 +294,27 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             )
             acc = store.get_account(args.account_id)
 
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
-        if AccountStatus(acc["status"]) == AccountStatus.RESTING:
-            store.transition_resting_to_ready_if_due(args.account_id, datetime.now(timezone.utc))
+        now_utc = datetime.now(timezone.utc)
+        cur_state = AccountStatus(acc["status"])
+        if cur_state == AccountStatus.RESTING:
+            # Interactive operator attach: clear resting cooldown if still active from prior run/simulation
+            store._conn.execute(
+                "UPDATE accounts SET cooldown_until = ? WHERE account_id = ?",
+                ((now_utc - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), args.account_id),
+            )
+            store._conn.commit()
+            store.transition_resting_to_ready_if_due(args.account_id, now_utc)
             acc = store.get_account(args.account_id)
+            cur_state = AccountStatus(acc["status"])
 
+        sess_kind = "DISCOVERY" if cur_state == AccountStatus.PENDING_DISCOVERY else "WORK"
         lease = store.acquire_session_lease(
             account_id=args.account_id,
             slot_id=0,
             task_id=args.recipe_id,
+            session_kind=sess_kind,
             bypass_circadian=True,
         )
         adapter = MicrobotHttpAdapter(
@@ -340,17 +352,29 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
         max_ticks = max(1, int(args.max_ticks))
         ticks_run = 0
         last_res = None
+        last_logged_sig = ""
 
         try:
             while ticks_run < max_ticks and not stop_event.is_set():
                 ticks_run += 1
                 t0 = time.monotonic()
                 last_res = kernel.step_tick(task_mod, now_monotonic=t0)
+                if not getattr(args, "quiet", False) and float(args.tick_interval_sec) > 0:
+                    d_name = str(last_res.task_directive.directive_type) if last_res.task_directive else "NONE"
+                    sig = f"{last_res.lifecycle_state}|{d_name}|{last_res.detail}"
+                    if sig != last_logged_sig or ticks_run % 10 == 0:
+                        last_logged_sig = sig
+                        msg_line = redactor.redact_text(
+                            f"[tick={ticks_run:04d}] state={last_res.lifecycle_state} | dir={d_name} | {last_res.detail}"
+                        )
+                        print(msg_line, file=sys.stderr, flush=True)
                 if last_res.halted:
                     break
                 if args.tick_interval_sec > 0:
                     rem = max(0.01, float(args.tick_interval_sec) - (time.monotonic() - t0))
                     stop_event.wait(timeout=rem)
+        except KeyboardInterrupt:
+            stop_event.set()
         finally:
             adapter.kill_process_tree()
             cur_acc = store.get_account(args.account_id)
@@ -358,6 +382,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
                 AccountStatus.RUNNING,
                 AccountStatus.STARTING,
                 AccountStatus.LEASED,
+                AccountStatus.DISCOVERING,
             ):
                 store.close_session(
                     account_id=args.account_id,
@@ -982,8 +1007,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_att.add_argument("--agility", type=int, default=1)
     p_att.add_argument("--combat-level", type=int, default=3)
     p_att.add_argument("--member", action="store_true")
-    p_att.add_argument("--max-ticks", type=int, default=600)
+    p_att.add_argument("--max-ticks", type=int, default=2500)
     p_att.add_argument("--tick-interval-sec", type=float, default=0.6)
+    p_att.add_argument("--quiet", action="store_true", help="Suppress live per-tick stderr telemetry")
 
     for name in ("dry-run-slot", "launch-slot"):
         p_slot = sub.add_parser(name, help=f"{'Dry-run' if name == 'dry-run-slot' else 'Launch'} isolated JVM slot")
