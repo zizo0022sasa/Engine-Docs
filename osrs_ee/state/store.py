@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sqlite3
@@ -9,7 +10,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from osrs_ee.contracts.models import validate_command_intent, validate_command_result
 from osrs_ee.security.redaction import Redactor
@@ -66,6 +67,45 @@ def _parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts).astimezone(timezone.utc)
 
 
+def is_process_alive(pid: int | None) -> bool:
+    """Cross-platform OS process liveness probe without sending destructive signals on Windows."""
+    if pid is None or int(pid) <= 0:
+        return False
+    target_pid = int(pid)
+    if target_pid == os.getpid():
+        return True
+    if os.name == "nt":
+        # Windows: NEVER call os.kill(pid, 0) (sends CTRL_C_EVENT=0). Query kernel32 exit code safely.
+        process_query_limited_info = 0x1000
+        still_active = 259
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.OpenProcess(process_query_limited_info, False, target_pid)
+            if not handle:
+                err = int(kernel32.GetLastError())
+                # ERROR_ACCESS_DENIED (5) means process exists under another elevation/session
+                return err == 5
+            try:
+                exit_code = ctypes.c_ulong(0)
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return int(exit_code.value) == still_active
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+
+    try:
+        os.kill(target_pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 class StateStore:
     """Single-writer transactional SQLite state store with human-readable JSON snapshot export."""
 
@@ -83,6 +123,7 @@ class StateStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
             str(self.db_path),
+            timeout=10.0,
             isolation_level=None,  # explicit transaction management
             check_same_thread=False,
         )
@@ -96,6 +137,7 @@ class StateStore:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA busy_timeout=10000;")
             self._conn.execute("PRAGMA synchronous=FULL;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
             self._conn.executescript(
@@ -134,7 +176,9 @@ class StateStore:
                     client_instance_id TEXT,
                     task_id TEXT NOT NULL,
                     has_unknown_command INTEGER NOT NULL DEFAULT 0,
-                    acquired_at TEXT NOT NULL
+                    acquired_at TEXT NOT NULL,
+                    owner_pid INTEGER,
+                    heartbeat_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS command_journal (
@@ -183,6 +227,14 @@ class StateStore:
                 );
                 """
             )
+            existing_cols = {
+                str(r["name"])
+                for r in self._conn.execute("PRAGMA table_info(active_leases)").fetchall()
+            }
+            if "owner_pid" not in existing_cols:
+                self._conn.execute("ALTER TABLE active_leases ADD COLUMN owner_pid INTEGER;")
+            if "heartbeat_at" not in existing_cols:
+                self._conn.execute("ALTER TABLE active_leases ADD COLUMN heartbeat_at TEXT;")
 
     def _tx_begin(self) -> None:
         self._conn.execute("BEGIN IMMEDIATE;")
@@ -345,6 +397,7 @@ class StateStore:
         now_utc: datetime | None = None,
         session_kind: str = "WORK",  # WORK | DISCOVERY | RECONCILE
         bypass_circadian: bool = False,
+        owner_pid: int | None = None,
     ) -> dict[str, Any]:
         now_utc = now_utc or datetime.now(timezone.utc)
         with self._lock:
@@ -414,6 +467,7 @@ class StateStore:
                 session_id = f"sess_{uuid.uuid4().hex[:12]}"
                 lease_id = f"lease_{uuid.uuid4().hex[:12]}"
                 now_s = _utc_iso(now_utc)
+                effective_pid = os.getpid() if owner_pid is None else int(owner_pid)
 
                 self._conn.execute(
                     """
@@ -427,8 +481,9 @@ class StateStore:
                     """
                     INSERT INTO active_leases (
                         account_id, session_id, lease_id, slot_id, proxy_ref,
-                        session_epoch, client_instance_id, task_id, acquired_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                        session_epoch, client_instance_id, task_id, acquired_at,
+                        owner_pid, heartbeat_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -438,6 +493,8 @@ class StateStore:
                         acc["proxy_ref"],
                         new_epoch,
                         task_id,
+                        now_s,
+                        effective_pid,
                         now_s,
                     ),
                 )
@@ -450,6 +507,7 @@ class StateStore:
                     "session_epoch": new_epoch,
                     "task_id": task_id,
                     "status": target_status.value,
+                    "owner_pid": effective_pid,
                 }
             except Exception:
                 self._tx_rollback()
@@ -490,8 +548,8 @@ class StateStore:
                     raise StaleContextError(f"Unexpected state {cur.value} during client bind")
 
                 self._conn.execute(
-                    "UPDATE active_leases SET client_instance_id = ? WHERE lease_id = ?",
-                    (client_instance_id, lease_id),
+                    "UPDATE active_leases SET client_instance_id = ?, heartbeat_at = ? WHERE lease_id = ?",
+                    (client_instance_id, now_s, lease_id),
                 )
                 self._conn.execute(
                     "UPDATE accounts SET status = ?, state_version = state_version + 1, updated_at = ? WHERE account_id = ?",
@@ -538,15 +596,36 @@ class StateStore:
         lease_id: str,
         session_epoch: int,
         client_instance_id: str | None = None,
+        now_utc: datetime | None = None,
+        refresh_heartbeat_min_interval_sec: float = 15.0,
     ) -> None:
+        now_dt = now_utc or datetime.now(timezone.utc)
         with self._lock:
-            self._assert_lease_unlocked(
+            lease = self._assert_lease_unlocked(
                 account_id=account_id,
                 session_id=session_id,
                 lease_id=lease_id,
                 session_epoch=session_epoch,
                 expected_client_instance_id=client_instance_id,
             )
+            hb_raw = lease["heartbeat_at"]
+            should_refresh = hb_raw is None
+            if not should_refresh and refresh_heartbeat_min_interval_sec >= 0.0:
+                try:
+                    age_sec = (now_dt - _parse_iso(str(hb_raw))).total_seconds()
+                    should_refresh = age_sec >= refresh_heartbeat_min_interval_sec
+                except Exception:
+                    should_refresh = True
+            if should_refresh and not self._conn.in_transaction:
+                try:
+                    self._tx_begin()
+                    self._conn.execute(
+                        "UPDATE active_leases SET heartbeat_at = ? WHERE lease_id = ?",
+                        (_utc_iso(now_dt), lease_id),
+                    )
+                    self._conn.execute("COMMIT;")
+                except Exception:
+                    self._tx_rollback()
 
     # ------------------------------------------------------------------
     # Write-Ahead Command Journal (AUD-12 / T07)
@@ -949,6 +1028,216 @@ class StateStore:
             except Exception:
                 self._tx_rollback()
                 raise
+
+    def reconcile_orphaned_leases(
+        self,
+        *,
+        now_utc: datetime | None = None,
+        target_account_id: str | None = None,
+        stale_heartbeat_sec: float = 90.0,
+        pid_alive_fn: Callable[[int | None], bool] = is_process_alive,
+    ) -> list[str]:
+        """Multi-slot-safe crash sweeper: reclaim ONLY dead/stale sessions without disturbing live slots.
+
+        An account/lease is considered orphaned after power loss, SIGKILL, or terminal crash when:
+          1. Account sits in `UNCLOSED_SESSION_STATES` with no row in `active_leases`; OR
+          2. Its `active_leases.owner_pid` is NULL or `pid_alive_fn(owner_pid)` is False; OR
+          3. Its `heartbeat_at` (or `acquired_at`) is older than `stale_heartbeat_sec` (guards PID reuse).
+        """
+        now_dt = now_utc or datetime.now(timezone.utc)
+        now_s = _utc_iso(now_dt)
+        recovered_accounts: list[str] = []
+
+        with self._lock:
+            try:
+                self._tx_begin()
+                unclosed_values = tuple(s.value for s in UNCLOSED_SESSION_STATES)
+                placeholders = ",".join("?" for _ in unclosed_values)
+                params: list[Any] = list(unclosed_values)
+                target_clause = ""
+                if target_account_id is not None:
+                    target_clause = " AND a.account_id = ?"
+                    params.append(target_account_id)
+
+                rows = self._conn.execute(
+                    f"""
+                    SELECT a.account_id, a.status,
+                           l.lease_id, l.owner_pid, l.heartbeat_at, l.acquired_at
+                      FROM accounts a
+                      LEFT JOIN active_leases l ON l.account_id = a.account_id
+                     WHERE (a.status IN ({placeholders}) OR l.lease_id IS NOT NULL)
+                    {target_clause}
+                    """,
+                    params,
+                ).fetchall()
+
+                for r in rows:
+                    acc_id = str(r["account_id"])
+                    lease_id = r["lease_id"]
+                    is_orphan = False
+                    if lease_id is None:
+                        is_orphan = True
+                    else:
+                        owner_pid = int(r["owner_pid"]) if r["owner_pid"] is not None else None
+                        if owner_pid is None or not pid_alive_fn(owner_pid):
+                            is_orphan = True
+                        elif stale_heartbeat_sec > 0.0:
+                            ts_ref = r["heartbeat_at"] or r["acquired_at"]
+                            if ts_ref:
+                                try:
+                                    age = (now_dt - _parse_iso(str(ts_ref))).total_seconds()
+                                    if age > stale_heartbeat_sec:
+                                        is_orphan = True
+                                except Exception:
+                                    is_orphan = True
+
+                    if not is_orphan:
+                        continue
+
+                    self._conn.execute(
+                        """
+                        UPDATE command_journal
+                           SET journal_state = ?, transport_status = 'CONNECTION_ERROR',
+                               effect_status = ?, diagnostic_note = 'Orphan recovery: outcome unknown',
+                               updated_at = ?
+                         WHERE account_id = ? AND journal_state = ?
+                        """,
+                        (
+                            CommandJournalState.UNKNOWN.value,
+                            CommandJournalState.UNKNOWN.value,
+                            now_s,
+                            acc_id,
+                            CommandJournalState.DISPATCHING.value,
+                        ),
+                    )
+                    self._conn.execute(
+                        """
+                        UPDATE command_journal
+                           SET journal_state = ?, transport_status = 'NOT_SENT',
+                               effect_status = ?, diagnostic_note = 'Orphan recovery: aborted prior to dispatch',
+                               updated_at = ?
+                         WHERE account_id = ? AND journal_state = ?
+                        """,
+                        (
+                            CommandJournalState.REJECTED.value,
+                            CommandJournalState.REJECTED.value,
+                            now_s,
+                            acc_id,
+                            CommandJournalState.PREPARED.value,
+                        ),
+                    )
+
+                    unknown_cmd = self._conn.execute(
+                        "SELECT 1 FROM command_journal WHERE account_id = ? AND journal_state = ?",
+                        (acc_id, CommandJournalState.UNKNOWN.value),
+                    ).fetchone()
+                    reason = (
+                        ReasonCode.UNKNOWN_COMMAND_EFFECT
+                        if unknown_cmd is not None
+                        else ReasonCode.CRASH_UNCLOSED_SESSION
+                    )
+
+                    self._conn.execute("DELETE FROM active_leases WHERE account_id = ?", (acc_id,))
+                    cur_status = AccountStatus(r["status"])
+                    if cur_status != AccountStatus.RECOVERY_REQUIRED:
+                        if cur_status in UNCLOSED_SESSION_STATES or cur_status == AccountStatus.RECONCILING:
+                            assert_valid_account_transition(cur_status, AccountStatus.RECOVERY_REQUIRED)
+                            self._conn.execute(
+                                """
+                                UPDATE accounts
+                                   SET status = ?, reason_code = ?, state_version = state_version + 1, updated_at = ?
+                                 WHERE account_id = ?
+                                """,
+                                (AccountStatus.RECOVERY_REQUIRED.value, reason.value, now_s, acc_id),
+                            )
+                    recovered_accounts.append(acc_id)
+
+                self._tx_commit()
+                return sorted(recovered_accounts)
+            except Exception:
+                self._tx_rollback()
+                raise
+
+    def acknowledge_crash_recovery(
+        self,
+        account_id: str,
+        *,
+        diagnostic_note: str = "Crash recovery acknowledged; world state reconciled",
+        now_utc: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Complete legal `RECOVERY_REQUIRED -> RECONCILING -> READY` transition while preserving cooldowns."""
+        now_dt = now_utc or datetime.now(timezone.utc)
+        now_s = _utc_iso(now_dt)
+        clean_note = self.redactor.redact_text(diagnostic_note)
+
+        with self._lock:
+            acc = self.get_account(account_id)
+            cur = AccountStatus(acc["status"])
+            if cur not in (AccountStatus.RECOVERY_REQUIRED, AccountStatus.RECONCILING):
+                raise StaleContextError(
+                    f"Account {account_id} is in {cur.value}; expected RECOVERY_REQUIRED or RECONCILING"
+                )
+
+            existing_lease = self._conn.execute(
+                "SELECT * FROM active_leases WHERE account_id = ?", (account_id,)
+            ).fetchone()
+
+            if existing_lease is None:
+                # Pick a free high reconcile slot (>= 900) so active fleet slots 0..15 never collide
+                occupied_slots = {
+                    int(r["slot_id"])
+                    for r in self._conn.execute("SELECT slot_id FROM active_leases").fetchall()
+                }
+                rec_slot = 900
+                while rec_slot in occupied_slots:
+                    rec_slot += 1
+                lease = self.acquire_session_lease(
+                    account_id=account_id,
+                    slot_id=rec_slot,
+                    task_id="CRASH_RECONCILE",
+                    now_utc=now_dt,
+                    session_kind="RECONCILE",
+                    bypass_circadian=True,
+                )
+            else:
+                lease = dict(existing_lease)
+
+            try:
+                self._tx_begin()
+                self._conn.execute(
+                    """
+                    UPDATE command_journal
+                       SET journal_state = ?, effect_status = ?, diagnostic_note = ?, updated_at = ?
+                     WHERE account_id = ? AND journal_state = ?
+                    """,
+                    (
+                        CommandJournalState.FAILED_VERIFIED.value,
+                        CommandJournalState.FAILED_VERIFIED.value,
+                        clean_note,
+                        now_s,
+                        account_id,
+                        CommandJournalState.UNKNOWN.value,
+                    ),
+                )
+                self._conn.execute(
+                    "UPDATE active_leases SET has_unknown_command = 0 WHERE lease_id = ?",
+                    (lease["lease_id"],),
+                )
+                self._tx_commit()
+            except Exception:
+                self._tx_rollback()
+                raise
+
+            self.close_session(
+                account_id=account_id,
+                session_id=str(lease["session_id"]),
+                lease_id=str(lease["lease_id"]),
+                session_epoch=int(lease["session_epoch"]),
+                target_status=AccountStatus.READY,
+                reason_code=ReasonCode.NONE,
+                now_utc=now_dt,
+            )
+            return self.get_account(account_id)
 
     # ------------------------------------------------------------------
     # RBAC & Single-Use Bound Approvals (AUD-04 / T03, T09)

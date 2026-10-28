@@ -80,6 +80,8 @@ def _git_safe_untracked_ignored_relpaths(repo_root: Path) -> set[str]:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
@@ -89,6 +91,8 @@ def _git_safe_untracked_ignored_relpaths(repo_root: Path) -> set[str]:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
@@ -155,6 +159,11 @@ def check_secret_file_permissions(secret_file: str | Path) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
     args = argv if argv is not None else sys.argv[1:]
     target = Path(args[0]) if args else Path.cwd()
     findings = scan_path(target)

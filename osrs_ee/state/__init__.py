@@ -18,6 +18,7 @@ from osrs_ee.state.store import (
     StaleContextError,
     StateStore,
     UnknownEffectPendingError,
+    is_process_alive,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "UnknownEffectPendingError",
     "compute_progression_stage",
     "is_in_circadian_sleep_window",
+    "is_process_alive",
 ]

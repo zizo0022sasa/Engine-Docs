@@ -16,6 +16,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import platform
@@ -55,6 +56,48 @@ def _resolve_data_dir(raw_dir: str | None) -> Path:
     return Path(raw_dir or os.environ.get("OSRS_EE_DATA_DIR", ".osrs_ee_data")).resolve()
 
 
+def configure_utf8_stdio(*, stdout: Any = None, stderr: Any = None) -> None:
+    """Reconfigure console stdio streams to UTF-8 so Windows CP1252 terminals never crash on emojis/Arabic."""
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32.SetConsoleOutputCP(65001)
+            kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+    for stream in (stdout if stdout is not None else sys.stdout, stderr if stderr is not None else sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        enc = str(getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8":
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
+
+
+def _safe_print(text: str, *, file: Any = None, flush: bool = False) -> None:
+    """Write text safely even if caller bound a non-UTF-8 `cp1252` stream without calling `main()`."""
+    target = sys.stdout if file is None else file
+    try:
+        print(text, file=target, flush=flush)
+    except UnicodeEncodeError:
+        raw_buf = getattr(target, "buffer", None)
+        if raw_buf is not None:
+            try:
+                target.flush()
+            except Exception:
+                pass
+            raw_buf.write((text + "\n").encode("utf-8", errors="backslashreplace"))
+            if flush:
+                raw_buf.flush()
+            return
+        fallback_enc = getattr(target, "encoding", None) or "ascii"
+        safe_txt = text.encode(fallback_enc, errors="backslashreplace").decode(fallback_enc, errors="ignore")
+        print(safe_txt, file=target, flush=flush)
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve()
     java_bin = shutil.which(args.java_bin)
@@ -62,7 +105,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if java_bin:
         try:
             proc = subprocess.run(
-                [java_bin, "-version"], capture_output=True, text=True, timeout=5, check=False
+                [java_bin, "-version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
             )
             out = (proc.stderr or proc.stdout).splitlines()
             java_version = out[0] if out else "detected"
@@ -88,7 +137,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "storage_ceiling_mb": GLOBAL_STORAGE_BUDGET_BYTES // (1024 * 1024),
         "secret_scan_findings": len(findings),
     }
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    _safe_print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if not findings else 1
 
 
@@ -108,7 +157,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     ge.close()
     outbox.close()
     store.close()
-    print(
+    _safe_print(
         json.dumps(
             {
                 "initialized": True,
@@ -129,7 +178,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     data_dir = _resolve_data_dir(args.data_dir)
     in_file = Path(args.file).resolve()
     if not in_file.is_file():
-        print(json.dumps({"error": f"Accounts file not found: {in_file}"}))
+        _safe_print(json.dumps({"error": f"Accounts file not found: {in_file}"}))
         return 2
 
     vault = LocalSecretVault(data_dir / "vault.json")
@@ -163,7 +212,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
                 for s in summaries
             ],
         }
-        print(vault.redactor.redact_text(json.dumps(payload, indent=2, ensure_ascii=False)))
+        _safe_print(vault.redactor.redact_text(json.dumps(payload, indent=2, ensure_ascii=False)))
         return 0
     finally:
         store.close()
@@ -175,7 +224,7 @@ def _cmd_grant_operator(args: argparse.Namespace) -> int:
     try:
         role = OperatorRole(args.role.upper())
         store.grant_operator_role(user_id=args.user_id, chat_id=args.chat_id, role=role)
-        print(
+        _safe_print(
             json.dumps(
                 {"granted": True, "user_id": args.user_id, "chat_id": args.chat_id, "role": role.value},
                 indent=2,
@@ -189,13 +238,14 @@ def _cmd_grant_operator(args: argparse.Namespace) -> int:
 def _cmd_status(args: argparse.Namespace) -> int:
     data_dir = _resolve_data_dir(args.data_dir)
     if not (data_dir / "state.db").exists():
-        print(json.dumps({"initialized": False, "hint": "Run `python -m osrs_ee init` first."}))
+        _safe_print(json.dumps({"initialized": False, "hint": "Run `python -m osrs_ee init` first."}))
         return 0
 
     redactor = LocalSecretVault(data_dir / "vault.json").redactor if (data_dir / "vault.json").exists() else Redactor()
     store = StateStore(data_dir / "state.db", snapshot_path=data_dir / "state_snapshot.json", redactor=redactor)
     ge = GEOrderLedger(data_dir / "ge.db")
     try:
+        orphaned = store.reconcile_orphaned_leases()
         rows = store._conn.execute(
             "SELECT account_id, auth_mode, region, status, reason_code, stage, quest_points, total_level, playtime_minutes, trade_unlocked, realized_gp FROM accounts ORDER BY account_id"
         ).fetchall()
@@ -209,9 +259,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
         out = {
             "total_accounts": len(accounts_out),
             "safe_concurrent_slots": cap.computed_safe_slots,
+            "auto_reconciled_orphaned_sessions": orphaned,
             "accounts": accounts_out,
         }
-        print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
+        _safe_print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
         return 0
     finally:
         ge.close()
@@ -260,16 +311,172 @@ def _cmd_live_probe(args: argparse.Namespace) -> int:
             "tcp_connect_count": adapter.tcp_connect_count,
             "http_request_count": adapter.http_request_count,
         }
-        print(redactor.redact_text(json.dumps(summary, indent=2, ensure_ascii=False)))
+        _safe_print(redactor.redact_text(json.dumps(summary, indent=2, ensure_ascii=False)))
         return 0
     finally:
         adapter.kill_process_tree()
 
 
+def _reconcile_account_via_live_client(
+    *,
+    store: StateStore,
+    account_id: str,
+    port: int,
+    agent_token: str,
+    redactor: Redactor,
+    quiet: bool = False,
+) -> dict[str, Any]:
+    """Execute legal `RECOVERY_REQUIRED -> RECONCILING -> READY` with live client observation sync."""
+    occupied_slots = {
+        int(r["slot_id"])
+        for r in store._conn.execute("SELECT slot_id FROM active_leases").fetchall()
+    }
+    rec_slot = 900
+    while rec_slot in occupied_slots:
+        rec_slot += 1
+
+    existing = store._conn.execute(
+        "SELECT * FROM active_leases WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    if existing is None:
+        rec_lease = store.acquire_session_lease(
+            account_id=account_id,
+            slot_id=rec_slot,
+            task_id="LIVE_CRASH_RECONCILE",
+            session_kind="RECONCILE",
+            bypass_circadian=True,
+        )
+    else:
+        rec_lease = dict(existing)
+
+    rec_adapter = MicrobotHttpAdapter(
+        account_id=account_id,
+        session_id=str(rec_lease["session_id"]),
+        session_epoch=int(rec_lease["session_epoch"]),
+        port=int(port),
+        agent_token=agent_token,
+        coalesce_window_ms=150,
+    )
+    try:
+        probe = rec_adapter.probe_session_state()
+        rec_gate = GameAdapterGate(store, rec_adapter)  # type: ignore[arg-type]
+        rec_gate.bind_to_lease(
+            account_id=account_id,
+            session_id=str(rec_lease["session_id"]),
+            lease_id=str(rec_lease["lease_id"]),
+            session_epoch=int(rec_lease["session_epoch"]),
+        )
+        obs = rec_gate.read_verified_observation(
+            account_id=account_id,
+            session_id=str(rec_lease["session_id"]),
+            lease_id=str(rec_lease["lease_id"]),
+            session_epoch=int(rec_lease["session_epoch"]),
+        )
+        if obs.get("login_state") == "LOGGED_IN":
+            store.apply_observation_snapshot(
+                event_id=f"reconcile_obs_{rec_lease['session_id']}",
+                observation=obs,
+            )
+        pos = obs.get("position") or {}
+        note = (
+            f"Live client observation reconciled on port {port} "
+            f"(reachable={probe.get('reachable')}, login_state={obs.get('login_state')}, "
+            f"pos=({pos.get('x')},{pos.get('y')},{pos.get('plane')}))"
+        )
+        updated = store.acknowledge_crash_recovery(account_id, diagnostic_note=note)
+        if not quiet:
+            _safe_print(
+                redactor.redact_text(
+                    f"[reconcile] Recovered orphaned session for {account_id} -> {updated['status']} ({note})"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+        return updated
+    finally:
+        rec_adapter.kill_process_tree()
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    """Dedicated crash-recovery & orphaned-lease reconciliation command (`python -m osrs_ee reconcile`)."""
+    data_dir = _resolve_data_dir(args.data_dir)
+    if not (data_dir / "state.db").exists():
+        _safe_print(json.dumps({"ok": False, "error": "state.db not found; run `python -m osrs_ee init` first."}))
+        return 1
+
+    redactor = LocalSecretVault(data_dir / "vault.json").redactor if (data_dir / "vault.json").exists() else Redactor()
+    store = StateStore(
+        data_dir / "state.db",
+        snapshot_path=data_dir / "state_snapshot.json",
+        redactor=redactor,
+    )
+    try:
+        if getattr(args, "force_boot_sweep", False):
+            orphaned = store.reconcile_on_boot()
+        else:
+            orphaned = store.reconcile_orphaned_leases(target_account_id=args.account_id)
+
+        query = "SELECT account_id FROM accounts WHERE status IN ('RECOVERY_REQUIRED', 'RECONCILING')"
+        q_params: tuple[Any, ...] = ()
+        if args.account_id:
+            query += " AND account_id = ?"
+            q_params = (args.account_id,)
+        pending_rows = store._conn.execute(query + " ORDER BY account_id", q_params).fetchall()
+        pending_ids = [str(r["account_id"]) for r in pending_rows]
+
+        readied: list[str] = []
+        still_recovery: list[str] = []
+
+        if args.port is not None and pending_ids:
+            token = _read_agent_token_file(args.token_file)
+            redactor.register_secret(token)
+            target_for_port = args.account_id or (pending_ids[0] if len(pending_ids) == 1 else None)
+            if target_for_port and target_for_port in pending_ids:
+                _reconcile_account_via_live_client(
+                    store=store,
+                    account_id=target_for_port,
+                    port=int(args.port),
+                    agent_token=token,
+                    redactor=redactor,
+                    quiet=True,
+                )
+                readied.append(target_for_port)
+
+        if getattr(args, "acknowledge", False):
+            for aid in pending_ids:
+                if aid in readied:
+                    continue
+                store.acknowledge_crash_recovery(
+                    aid,
+                    diagnostic_note="CLI `reconcile --acknowledge` operator attestation",
+                )
+                readied.append(aid)
+
+        for aid in pending_ids:
+            if aid not in readied:
+                still_recovery.append(aid)
+
+        store.export_snapshot()
+        payload = {
+            "ok": True,
+            "reclaimed_orphaned_leases": orphaned,
+            "transitioned_to_ready": readied,
+            "awaiting_reconciliation": still_recovery,
+        }
+        _safe_print(redactor.redact_text(json.dumps(payload, indent=2, ensure_ascii=False)))
+        return 0
+    finally:
+        store.close()
+
+
 def _cmd_attach_bot(args: argparse.Namespace) -> int:
     data_dir = _resolve_data_dir(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    redactor = Redactor()
+    redactor = (
+        LocalSecretVault(data_dir / "vault.json").redactor
+        if (data_dir / "vault.json").exists()
+        else Redactor()
+    )
     token = _read_agent_token_file(args.token_file)
     redactor.register_secret(token)
 
@@ -279,6 +486,9 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
         redactor=redactor,
     )
     try:
+        # 1. Reclaim any orphaned leases left behind by power outage / SIGKILL without disturbing live slots
+        store.reconcile_orphaned_leases(target_account_id=args.account_id)
+
         try:
             acc = store.get_account(args.account_id)
         except KeyError:
@@ -286,7 +496,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
                 account_id=args.account_id,
                 auth_mode="LEGACY_CREDENTIALS",
                 credential_ref=f"vault://accounts/{args.account_id}/auth",
-                proxy_ref="vault://proxies/local_attached",
+                proxy_ref=f"vault://proxies/local_attached_{args.account_id}",
                 region="EG",
                 timezone_name="Africa/Cairo",
                 persona_seed=101,
@@ -308,11 +518,27 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             store.transition_resting_to_ready_if_due(args.account_id, now_utc)
             acc = store.get_account(args.account_id)
             cur_state = AccountStatus(acc["status"])
+        elif cur_state in (AccountStatus.RECOVERY_REQUIRED, AccountStatus.RECONCILING):
+            # 2. Legal crash recovery via live post-crash client observation (`RECOVERY_REQUIRED -> RECONCILING -> READY`)
+            acc = _reconcile_account_via_live_client(
+                store=store,
+                account_id=args.account_id,
+                port=int(args.port),
+                agent_token=token,
+                redactor=redactor,
+                quiet=bool(getattr(args, "quiet", False)),
+            )
+            cur_state = AccountStatus(acc["status"])
 
+        slot_id = (
+            int(args.slot_id)
+            if getattr(args, "slot_id", None) is not None
+            else max(0, int(args.port) - 8081)
+        )
         sess_kind = "DISCOVERY" if cur_state == AccountStatus.PENDING_DISCOVERY else "WORK"
         lease = store.acquire_session_lease(
             account_id=args.account_id,
-            slot_id=0,
+            slot_id=slot_id,
             task_id=args.recipe_id,
             session_kind=sess_kind,
             bypass_circadian=True,
@@ -370,7 +596,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
                         msg_line = redactor.redact_text(
                             f"[tick={ticks_run:04d}] state={last_res.lifecycle_state} | dir={d_name} | {last_res.detail}"
                         )
-                        print(msg_line, file=sys.stderr, flush=True)
+                        _safe_print(msg_line, file=sys.stderr, flush=True)
                 if last_res.halted:
                     break
                 if args.tick_interval_sec > 0:
@@ -406,7 +632,7 @@ def _cmd_attach_bot(args: argparse.Namespace) -> int:
             "final_directive": str(last_res.task_directive.directive_type) if (last_res and last_res.task_directive) else None,
             "detail": last_res.detail if last_res else "",
         }
-        print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
+        _safe_print(redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
         return 0
     finally:
         store.close()
@@ -426,11 +652,8 @@ def _parse_int_csv(raw: str | None) -> list[int]:
 
 def _build_telegram_env_context(data_dir: Path) -> tuple[Redactor, StateStore, BoundedOutbox, TelegramGateway, dict[str, Any]]:
     data_dir.mkdir(parents=True, exist_ok=True)
-    redactor = (
-        LocalSecretVault(data_dir / "vault.json").redactor
-        if (data_dir / "vault.json").exists()
-        else Redactor()
-    )
+    vault = LocalSecretVault(data_dir / "vault.json")
+    redactor = vault.redactor
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if bot_token and not bot_token.startswith("<"):
         redactor.register_secret(bot_token)
@@ -458,10 +681,12 @@ def _build_telegram_env_context(data_dir: Path) -> tuple[Redactor, StateStore, B
         snapshot_path=data_dir / "state_snapshot.json",
         redactor=redactor,
     )
+    store.reconcile_orphaned_leases()
     outbox = BoundedOutbox(data_dir / "outbox.db", redactor=redactor)
     gw = TelegramGateway(
         store=store,
         outbox=outbox,
+        vault=vault,
         redactor=redactor,
         allowed_chat_ids=allowed_set if allowed_set else None,
     )
@@ -543,7 +768,7 @@ def _cmd_telegram_check(args: argparse.Namespace) -> int:
             "processed_pending_live_updates": processed_live_updates,
             "delivered_ping_chats": delivered_ping_chats,
         }
-        print(redactor.redact_text(json.dumps(report, indent=2, ensure_ascii=False)))
+        _safe_print(redactor.redact_text(json.dumps(report, indent=2, ensure_ascii=False)))
         return 0 if report["ok"] else 1
     finally:
         outbox.close()
@@ -589,7 +814,7 @@ def _cmd_plan_route(args: argparse.Namespace) -> int:
         destination=args.destination,
         capabilities=caps,
     )
-    print(
+    _safe_print(
         json.dumps(
             {
                 "account_id": args.account_id,
@@ -614,7 +839,7 @@ def _cmd_plan_stagger(args: argparse.Namespace) -> int:
     accs = [a.strip() for a in args.accounts.split(",") if a.strip()]
     planner = StaggeredLaunchPlanner()
     plan = planner.plan_launches(accs, base_epoch_sec=0.0)
-    print(
+    _safe_print(
         json.dumps(
             {
                 "min_stagger_sec": planner.min_stagger_sec,
@@ -799,7 +1024,7 @@ def _cmd_simulate_pilot(args: argparse.Namespace) -> int:
         }
         if mission_report is not None:
             out_payload["stronghold_mission_simulation"] = mission_report
-        print(
+        _safe_print(
             json.dumps(
                 out_payload,
                 indent=2,
@@ -820,6 +1045,7 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
         redactor=vault.redactor,
     )
     try:
+        store.reconcile_orphaned_leases(target_account_id=args.account_id)
         acc = store.get_account(args.account_id)
         proxy_secret = vault.resolve_secret(acc["proxy_ref"])
         cred_secret = vault.resolve_secret(acc["credential_ref"])
@@ -858,8 +1084,14 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
                     "local_socks5_sidecar": f"socks5://127.0.0.1:{sidecar.listen_port}",
                     "jvm_command": jvm_cmd,
                 }
-                print(vault.redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
+                _safe_print(vault.redactor.redact_text(json.dumps(out, indent=2, ensure_ascii=False)))
                 return 0
+
+            if AccountStatus(acc["status"]) in (AccountStatus.RECOVERY_REQUIRED, AccountStatus.RECONCILING):
+                acc = store.acknowledge_crash_recovery(
+                    args.account_id,
+                    diagnostic_note="Cold JVM launch crash recovery acknowledged",
+                )
 
             # Live launch mode on operator host!
             env_vars: dict[str, str] = {}
@@ -910,7 +1142,7 @@ def _cmd_dry_run_or_launch_slot(args: argparse.Namespace, *, dry_run: bool) -> i
                 capabilities=caps,
             )
             task_mod = _resolve_task_module(args.recipe_id)
-            print(
+            _safe_print(
                 vault.redactor.redact_text(
                     json.dumps(
                         {
@@ -980,6 +1212,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="Display sanitized fleet status, GE PnL, and safe slot capacity")
 
+    p_rec = sub.add_parser("reconcile", help="Reclaim orphaned leases after power loss/crash and reconcile accounts")
+    p_rec.add_argument("--account-id", default=None, help="Specific account_id to reconcile (default: all)")
+    p_rec.add_argument("--port", type=int, default=None, help="Optional live Microbot port for post-crash observation sync")
+    p_rec.add_argument("--token-file", default=None, help="Path to .agent-token when --port is supplied")
+    p_rec.add_argument("--acknowledge", action="store_true", help="Complete RECOVERY_REQUIRED -> RECONCILING -> READY offline")
+    p_rec.add_argument("--force-boot-sweep", action="store_true", help="Run unconditional cold-boot sweep across all leases")
+
     p_stag = sub.add_parser("plan-stagger", help="Generate >=90s staggered cold-start schedule")
     p_stag.add_argument("--accounts", required=True, help="Comma-separated account IDs (e.g. acc_01,acc_02)")
 
@@ -1008,6 +1247,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_att = sub.add_parser("attach-bot", help="Attach a decoupled TaskModule bot to a running Microbot port 8081")
     p_att.add_argument("--recipe-id", default="stage2_stronghold_10k", choices=list(BotModuleRegistry().list_registered_ids()))
     p_att.add_argument("--port", type=int, default=8081)
+    p_att.add_argument("--slot-id", type=int, default=None, help="Fleet slot ID (default: port - 8081)")
     p_att.add_argument("--account-id", default="acc_live_01")
     p_att.add_argument("--token-file", default=None, help="Path to .agent-token (default: ~/.runelite/.agent-token)")
     p_att.add_argument("--agility", type=int, default=1)
@@ -1039,6 +1279,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     load_dotenv(Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1061,6 +1302,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_telegram_poll(args)
     if cmd == "status":
         return _cmd_status(args)
+    if cmd == "reconcile":
+        return _cmd_reconcile(args)
     if cmd == "plan-stagger":
         return _cmd_plan_stagger(args)
     if cmd == "plan-route":
