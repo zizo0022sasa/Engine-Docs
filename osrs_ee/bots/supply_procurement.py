@@ -22,6 +22,9 @@ Design invariants:
 - Every step carries cumulative `produces` tuples (`(item_id, cumulative_qty)`), which makes repeated
   gathering (e.g. 3 Goblin mails) naturally resumable.
 - No `time.sleep`, no HTTP, no sockets — returns declarative `TaskDirective` only.
+- `PR-20` consumption latch: a step that DESTROYS inventory (`uses_up`) is never "done" merely
+  because it was dispatched; it completes only when the live inventory actually shrinks, and the next
+  step waits out a short action-grace window (`settle_ticks`) so the client can finish its animation.
 - Stall detection per `(item, step)`: alias rotation, then precise `SUPPLY_STEP_STALLED` escalation
   so the field operator gets an exact, actionable diagnostic line instead of a silent bank loop.
 
@@ -80,6 +83,8 @@ YELLOW_DYE_ID = 1765
 BLUE_DYE_ID = 1767
 ORANGE_DYE_ID = 1769
 
+COINS_ID = 995  # Wyson (20 GP) + Aggie (5 GP per dye) — withdrawn from the bot's OWN banked earnings
+
 MAX_STEP_ATTEMPTS = 26
 MAX_RECURSION_DEPTH = 3
 
@@ -93,6 +98,7 @@ class SupplyStepKind(StrEnum):
     NPC = "NPC"
     COMBINE = "COMBINE"
     CLIMB = "CLIMB"
+    ENTER_UNDERGROUND = "ENTER_UNDERGROUND"
     EXIT_UNDERGROUND = "EXIT_UNDERGROUND"
 
 
@@ -115,6 +121,16 @@ class SupplyStep:
     produces: tuple[tuple[int, int], ...] = ()
     # Items that MUST be in inventory before this step can run (recursively procured).
     consumes: tuple[tuple[int, int], ...] = ()
+    # `PR-20` consumption latch: items this step **destroys** in the world (e.g. the hopper eats the
+    # grain). A produce-less step that declares `uses_up` is NOT complete on dispatch — it only counts
+    # as done once the live inventory actually shrinks. This is the exact field defect of tick 289:
+    # `Fill` was "done" the instant it was clicked, so `Operate` and `Climb-down` fired 600 ms later
+    # while the character was still walking, leaving the grain in the bag and the flour bin empty.
+    uses_up: tuple[tuple[int, int], ...] = ()
+    # `PR-20` action grace: ticks that must elapse after this step before the NEXT step of the same
+    # chain may be dispatched (`None` = engine default). Prevents the client from being interrupted
+    # mid-animation.
+    settle_ticks: int | None = None
     note: str = ""
 
 
@@ -173,6 +189,16 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=BUCKET_ID,
         label="Bucket",
         steps=(
+            SupplyStep(
+                # `PR-20`: `(3216,9625)` is a DIFFERENT map region, not a walk away. The engine needs an
+                # explicit, authorized descent through the kitchen staircase before it can stand next
+                # to the bucket — mirroring `EXIT_UNDERGROUND` on the way out.
+                kind=SupplyStepKind.ENTER_UNDERGROUND,
+                area=_at("LUMBRIDGE_KITCHEN"),
+                targets=("Staircase", "Stairs", "Ladder"),
+                action="Climb-down",
+                note="Lumbridge Castle kitchen staircase down into the cellar",
+            ),
             SupplyStep(
                 kind=SupplyStepKind.PICKUP,
                 area=_at("LUMBRIDGE_CASTLE_BASEMENT"),
@@ -241,6 +267,8 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 # empty pot (kitchen) are both ground-floor errands, so the bot can never strand itself
                 # upstairs on the hopper floor looking for ingredients it should already hold.
                 consumes=((GRAIN_ID, 1), (POT_ID, 1)),
+                # Opening a door is instantaneous; the ladder step needs no grace window.
+                settle_ticks=0,
                 note="mill entrance door 1521 at (3166,3302)",
             ),
             SupplyStep(
@@ -258,6 +286,9 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 targets=("Hopper",),
                 action="Fill",
                 consumes=((GRAIN_ID, 1),),
+                # `PR-20` FIELD FIX (tick 289): the hopper EATS the grain. Until that grain has actually
+                # left the inventory, this step is not done — never advance to `Operate`/`Climb-down`.
+                uses_up=((GRAIN_ID, 1),),
                 note="top floor hopper: Fill with grain",
             ),
             SupplyStep(
@@ -328,6 +359,11 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 targets=("Staircase", "Stairs", "Ladder"),
                 action="Climb-up",
                 target_plane=1,
+                # `PR-20` STRANDING FIX: the climb must not happen until the wool is actually in the
+                # bag, otherwise the bot walks upstairs empty-handed, realises the spin wheel needs
+                # wool, walks back down to shear, and can never climb again (the stair latch has
+                # already fired). Acquire first, then climb — same rule as the mill door.
+                consumes=((WOOL_ID, 20),),
                 note="Lumbridge Castle north staircase -> 1st floor (spin wheel is NOT reachable on plane 0)",
             ),
             SupplyStep(
@@ -367,6 +403,9 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("FALADOR_PARK"),
                 targets=("Wyson the gardener", "Wyson"),
                 action="Talk-to",
+                # `PR-20`: 2 woad leaves are NOT free — Wyson asks for 20 GP. The coins are withdrawn
+                # from the bot's OWN banked earnings (never handed over by the operator).
+                consumes=((COINS_ID, 20),),
                 produces=((WOAD_LEAF_ID, 2),),
                 note="Wyson sells 2 woad leaves for 20 GP",
             ),
@@ -386,7 +425,7 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("DRAYNOR_AGGIE"),
                 targets=("Aggie",),
                 action="Talk-to",
-                consumes=((WOAD_LEAF_ID, 2),),
+                consumes=((WOAD_LEAF_ID, 2), (COINS_ID, 5)),
                 produces=((BLUE_DYE_ID, 1),),
                 note="Aggie crafts blue dye from 2 woad leaves + 5 GP",
             ),
@@ -434,7 +473,7 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("DRAYNOR_AGGIE"),
                 targets=("Aggie",),
                 action="Talk-to",
-                consumes=((REDBERRY_ID, 3),),
+                consumes=((REDBERRY_ID, 3), (COINS_ID, 5)),
                 produces=((RED_DYE_ID, 1),),
                 note="Aggie crafts red dye from 3 redberries + 5 GP",
             ),
@@ -454,7 +493,7 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("DRAYNOR_AGGIE"),
                 targets=("Aggie",),
                 action="Talk-to",
-                consumes=((ONION_ID, 2),),
+                consumes=((ONION_ID, 2), (COINS_ID, 5)),
                 produces=((YELLOW_DYE_ID, 1),),
                 note="Aggie crafts yellow dye from 2 onions + 5 GP",
             ),
@@ -535,6 +574,10 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
 }
 
 
+# Human-readable labels for items that have no recipe of their own (they are WITHDRAWN, not crafted).
+ITEM_LABELS: dict[int, str] = {COINS_ID: "Coins"}
+
+
 def _inv_qty(items: tuple[Mapping[str, Any], ...], item_id: int) -> int:
     return sum(
         int(it.get("quantity", 0))
@@ -568,6 +611,18 @@ class ZeroTouchSupplyEngine:
     _active_item_id: int | None = None
     _escalation: str = ""
     _recurse: Callable[[TickContext, int, int, str], TaskDirective | None] | None = None
+    # `PR-20` consumption latch: key -> inventory snapshot taken when the consuming action was
+    # dispatched `((item_id, qty_at_dispatch), ...)`. The step is complete only once every entry has
+    # dropped BELOW its snapshot (i.e. the world actually took the item).
+    _pending_consumption: dict[tuple[int, int], tuple[tuple[int, int], ...]] = field(default_factory=dict)
+    _consume_wait: dict[tuple[int, int], int] = field(default_factory=dict)
+    # `PR-20` action grace: key -> first game tick at which the FOLLOWING step may be dispatched.
+    _settle_until: dict[tuple[int, int], int] = field(default_factory=dict)
+    _settle_waits: dict[tuple[int, int], int] = field(default_factory=dict)
+    # Ticks the client is left alone after an action so its walk/animation can finish.
+    settle_ticks: int = 3
+    # How long the engine re-issues a consuming action while waiting for the inventory to shrink.
+    max_consume_wait: int = 16
 
     # -- public API ---------------------------------------------------------
     @property
@@ -624,6 +679,54 @@ class ZeroTouchSupplyEngine:
 
         for idx, step in enumerate(recipe.steps):
             key = (recipe.item_id, idx)
+            # `PR-20` action grace: never dispatch the next step of a chain inside the settle window of
+            # the previous one. In the field the bot was still walking/animately busy 600 ms after
+            # clicking, so `Operate` + `Climb-down` were swallowed.
+            settle_key = (recipe.item_id, idx - 1)
+            settle_until = self._settle_until.get(settle_key)
+            if settle_until is not None:
+                waits = self._settle_waits.get(settle_key, 0)
+                # Anti-deadlock: a client that stops reporting ticks must never freeze the chain.
+                if ctx.game_tick < settle_until and waits <= self.settle_ticks * 3:
+                    self._settle_waits[settle_key] = waits + 1
+                    return TaskDirective(
+                        directive_type=DirectiveType.WAIT_NEXT_TICK,
+                        reason=(
+                            f"Zero-Touch supply: letting {recipe.label} settle "
+                            f"({max(0, settle_until - ctx.game_tick)} tick(s) of action grace left)"
+                        ),
+                    )
+                self._settle_until.pop(settle_key, None)
+                self._settle_waits.pop(settle_key, None)
+            # `PR-20` consumption latch: a consuming step is only complete when the item is GONE.
+            pending = self._pending_consumption.get(key)
+            if pending is not None:
+                if all(
+                    _inv_qty(ctx.inventory_items, iid) < baseline for iid, baseline in pending
+                ):
+                    self._pending_consumption.pop(key, None)
+                    self._consume_wait.pop(key, None)
+                    self._done.add(key)
+                    self._settle_until[key] = ctx.game_tick + self._settle_for(step)
+                    continue
+                waits = self._consume_wait.get(key, 0) + 1
+                self._consume_wait[key] = waits
+                if waits > self.max_consume_wait:
+                    return self._escalate(
+                        f"SUPPLY_STEP_STALLED:{recipe.label}:{step.kind}:"
+                        f"{step.targets[0] if step.targets else recipe.label}"
+                    )
+                # The client has not applied the consumption yet: walk to the object if needed and
+                # re-issue the action (idempotent for a hopper: "The hopper is already full").
+                if step.area is not None and not self._at_area(ctx, step):
+                    return self._travel(ctx, step, recipe)
+                if ctx.bank_is_open:
+                    return TaskDirective(
+                        directive_type=DirectiveType.BANK_TURNAROUND,
+                        payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                        reason=f"Zero-Touch supply: closing bank while stoking {recipe.label}",
+                    )
+                return self._emit(ctx, recipe, idx, step)
             if step.produces:
                 if all(_inv_qty(ctx.inventory_items, pid) >= qty for pid, qty in step.produces):
                     continue
@@ -639,13 +742,20 @@ class ZeroTouchSupplyEngine:
                 if _inv_qty(ctx.inventory_items, needed_id) >= needed_qty:
                     continue
                 if self._recurse is not None:
-                    nested = self._recurse(
-                        ctx, needed_id, needed_qty, str(self.recipes.get(needed_id).label if self.recipes.get(needed_id) else needed_id)
+                    needed_recipe = self.recipes.get(needed_id)
+                    needed_label = (
+                        needed_recipe.label
+                        if needed_recipe is not None
+                        else ITEM_LABELS.get(needed_id, str(needed_id))
                     )
+                    nested = self._recurse(ctx, needed_id, needed_qty, needed_label)
                     if nested is not None:
                         return nested
                     continue
-                return self._ensure(ctx, needed_id, needed_qty, depth=depth + 1)
+                nested = self._ensure(ctx, needed_id, needed_qty, depth=depth + 1)
+                if nested is not None:
+                    return nested
+                continue
             # `PR-19.4`: leaving a cave/basement is an AUTHORIZED exit, never accidental displacement.
             # Handled before the area gate so the bot never tries to walk to a surface tile from y>=5000.
             if step.kind == SupplyStepKind.EXIT_UNDERGROUND:
@@ -658,6 +768,37 @@ class ZeroTouchSupplyEngine:
                     targets=step.targets or ("Staircase", "Stairs", "Ladder"),
                     action=step.action or "Climb-up",
                     area_label=step.area.label if step.area else "",
+                )
+
+            # `PR-20`: entering a cellar/cave is an explicit AUTHORIZED descent, never a `/walk` into a
+            # different map region. Stateless: the live classification IS the latch.
+            if step.kind == SupplyStepKind.ENTER_UNDERGROUND:
+                if classify_underground(ctx.position.x, ctx.position.y):
+                    continue
+                if ctx.bank_is_open:
+                    return TaskDirective(
+                        directive_type=DirectiveType.BANK_TURNAROUND,
+                        payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                        reason=f"Zero-Touch supply: closing bank before descending for {recipe.label}",
+                    )
+                if step.area is not None and not self._at_area(ctx, step):
+                    return self._travel(ctx, step, recipe)
+                descents = self._walk_attempts.get(key, 0) + 1
+                self._walk_attempts[key] = descents
+                if descents > self.max_climb_attempts:
+                    return self._escalate(
+                        f"SUPPLY_ENTER_FAILED:{step.area.label if step.area else recipe.label}"
+                    )
+                down_payload: dict[str, Any] = {
+                    "name": self._pick_alias(recipe.item_id, idx, step),
+                    "action": step.action or "Climb-down",
+                }
+                if step.object_id is not None:
+                    down_payload["id"] = int(step.object_id)
+                return TaskDirective(
+                    directive_type=DirectiveType.INTERACT_OBJECT,
+                    payload=down_payload,
+                    reason=f"Zero-Touch supply: descending into the cellar for {recipe.label}",
                 )
 
             # CLIMB is resolved before the surface area gate: once we are on the target plane there is
@@ -727,11 +868,25 @@ class ZeroTouchSupplyEngine:
                     reason=f"Zero-Touch supply: closing bank before gathering {recipe.label}",
                 )
             directive = self._emit(ctx, recipe, idx, step)
-            # A step with no derivable postcondition (e.g. hopper `Fill`) is dispatched EXACTLY ONCE:
-            # re-firing it would empty a hopper that is already primed.
-            if not step.produces and directive.directive_type != DirectiveType.ESCALATE_HUMAN:
-                self._done.add(key)
-                self._emitted.add(key)
+            if directive.directive_type != DirectiveType.ESCALATE_HUMAN:
+                if step.uses_up and not step.produces:
+                    # `PR-20` FIELD FIX (live tick 289): a produce-less step that DESTROYS inventory
+                    # (the hopper eats the grain) is NOT done because it was dispatched. Latch on the
+                    # observable postcondition instead — the inventory must actually shrink.
+                    self._pending_consumption[key] = tuple(
+                        (iid, _inv_qty(ctx.inventory_items, iid)) for iid, _qty in step.uses_up
+                    )
+                    self._consume_wait[key] = 0
+                    self._emitted.add(key)
+                elif not step.produces:
+                    # A step with no derivable postcondition (e.g. `Operate`) is dispatched EXACTLY
+                    # ONCE — re-firing it would empty a hopper that is already primed — but the rest of
+                    # the chain is held back for `settle_ticks` so the animation can finish.
+                    self._done.add(key)
+                    self._emitted.add(key)
+                    settle = self._settle_for(step)
+                    if settle > 0:
+                        self._settle_until[key] = ctx.game_tick + settle
             return directive
         return self._escalate(f"SUPPLY_CHAIN_EXHAUSTED:{recipe.label}")
 
@@ -809,6 +964,35 @@ class ZeroTouchSupplyEngine:
             return True
         return False
 
+    def recipe_is_underground(self, item_id: int) -> bool:
+        """True when `item_id` is produced BELOW ground (`PR-20`).
+
+        The `PR-19.4` surface guard exists so the bot never walks across the map from `y >= 5000`.
+        It must NOT preempt a recipe whose whole point is to go down there (the Lumbridge cellar
+        bucket) — otherwise the bot descends, is immediately marched back out, and ping-pongs until
+        `SUPPLY_ENTER_FAILED`.
+        """
+        return self._requires_underground(item_id, depth=0)
+
+    def _requires_underground(self, item_id: int, *, depth: int) -> bool:
+        """Recursive over the ingredient tree: `Bucket of milk` needs the cellar because its
+        `Bucket (1925)` does. A non-recursive check made the surface guard fight the descent forever
+        (descend -> guard drags the bot out -> descend ...)."""
+        if depth > MAX_RECURSION_DEPTH:
+            return False
+        recipe = self.recipes.get(item_id)
+        if recipe is None:
+            return False
+        for step in recipe.steps:
+            if step.kind in (SupplyStepKind.ENTER_UNDERGROUND, SupplyStepKind.EXIT_UNDERGROUND):
+                return True
+            if step.area is not None and classify_underground(step.area.x, step.area.y):
+                return True
+            for needed_id, _qty in step.consumes:
+                if self._requires_underground(needed_id, depth=depth + 1):
+                    return True
+        return False
+
     def ensure_underground_exit(self, ctx: TickContext, label: str = "") -> TaskDirective:
         """Public entry point: leave whatever cave/cellar the bot is standing in, authorized."""
         return self._emit_underground_exit(ctx, (-1, -1), label=label or "surface travel")
@@ -875,6 +1059,12 @@ class ZeroTouchSupplyEngine:
             ctx.position.plane == step.area.plane
             and ctx.position.chebyshev_distance(step.area) <= self.walk_tolerance
         )
+
+    def _settle_for(self, step: SupplyStep) -> int:
+        """Action-grace window for one completed step (`PR-20`)."""
+        if step.settle_ticks is not None:
+            return max(0, int(step.settle_ticks))
+        return max(0, int(self.settle_ticks))
 
     def _pick_alias(self, item_id: int, idx: int, step: SupplyStep) -> str:
         """Rotate through Wiki-verified display-name aliases when a step stalls on name drift."""

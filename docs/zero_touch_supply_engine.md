@@ -410,3 +410,135 @@ ping-pong. Fixed with `_done` latch on arrival.
 | `T102` | end-to-end kernel run produces `Pot of flour (1933)` with zero escalation |
 
 `T101` is the antidote to this bug class: a transposed digit now fails the suite, not a live run.
+
+---
+
+## 15. `PR-20` — Hopper consumption latch, the 12-QP cascade, and the coin economy (field incident #6)
+
+### 15.1 The incident: dispatch is not completion (tick 289 → 349)
+
+The field run reached the windmill and executed nearly everything perfectly — then halted:
+
+```text
+[tick=0289] INTERACT_OBJECT | Fill  Pot of flour source (top floor hopper: Fill with grain)
+[tick=0290] INTERACT_OBJECT | Operate Pot of flour source (operate the controls ...)
+[tick=0291] INTERACT_OBJECT | climbing to plane 0 for Pot of flour
+[tick=0323] INTERACT_OBJECT | Empty Pot of flour source (ground-floor flour bin 1781 (3166,3306))
+[tick=0349] ESCALATE_HUMAN | SUPPLY_STEP_STALLED:Pot of flour:OBJECT:Flour bin
+```
+
+Post-run inventory scan: `Grain (1947)` was **still in the bag**. The hopper never received it, so the
+bin was empty and every `Empty` click was a no-op.
+
+The engine treated *dispatch* as *completion* for every step without a `produces` clause:
+
+```python
+# before (PR-19.6) — the defect
+if not step.produces and directive.directive_type != DirectiveType.ESCALATE_HUMAN:
+    self._done.add(key)          # "done" the instant it was clicked
+```
+
+So `Fill` completed on the tick it was issued, `Operate` followed 600 ms later and `Climb-down` 600 ms
+after that — while the character was still walking to the hopper. In the real client each interaction
+needs 2–3 ticks to path to the object and play the animation.
+
+### 15.2 The fix: a consumption latch + an action-grace window
+
+Two new declarative fields on `SupplyStep`:
+
+| field | meaning |
+|---|---|
+| `uses_up` | items this step **destroys** in the world. A produce-less step with `uses_up` is *not* done on dispatch — it completes only when the live inventory actually shrinks below the dispatch-time snapshot. |
+| `settle_ticks` | ticks the client is left alone after the step before the next step of the chain may be dispatched (`None` = engine default `3`, `0` disables). |
+
+```python
+# after (PR-20)
+if step.uses_up and not step.produces:
+    self._pending_consumption[key] = tuple(
+        (iid, _inv_qty(ctx.inventory_items, iid)) for iid, _qty in step.uses_up
+    )
+    ...
+```
+
+The hopper now declares `uses_up=((GRAIN_ID, 1),)`; the mill door keeps `consumes=((Grain,1),(Pot,1))`
+with **no** `uses_up` (it needs the items, it does not destroy them) and `settle_ticks=0`.
+
+Anti-false-positive rules:
+* while the grain has not been consumed the engine **re-issues `Fill`** (idempotent — "the hopper is
+  already full"), walking back to the object first if needed;
+* after `max_consume_wait = 16` attempted ticks it escalates with the exact field string
+  `SUPPLY_STEP_STALLED:Pot of flour:OBJECT:Hopper` — a genuinely broken chain still stops;
+* the settle window is hard-capped (anti-deadlock) in case a client stops reporting ticks.
+
+### 15.3 Finding #2: the spinning wheel stranding (found while building T109/T110)
+
+`Ball of wool` climbed to plane 1 **before** the wool existed. Once upstairs the engine discovered the
+wool was missing, went back down to shear, and could never climb again — the stair latch had already
+fired. Fix: the climb step now carries `consumes=((WOOL_ID, 20),)`. **Rule: never place a
+required-acquisition step above a `CLIMB`.**
+
+### 15.4 Finding #3: no way *into* a cellar (found by the 12-QP pipeline)
+
+`Bucket (1925)` spawns at `(3216, 9625)` — a different map region, not a walk away. The engine only had
+`EXIT_UNDERGROUND`. Added `SupplyStepKind.ENTER_UNDERGROUND` (authorized descent, stateless: the live
+classification *is* the latch) plus a **recipe-aware** surface guard:
+
+```python
+# quests_module._procure — PR-20
+if not self.supply.recipe_is_underground(item_id):     # recursive over the ingredient tree
+    underground_exit = self._authorize_exit_if_underground(ctx, label)
+```
+
+Without the recursion the bot descended for the bucket, and the next request (`Bucket of milk`) dragged
+it straight back out — `SUPPLY_ENTER_FAILED:LUMBRIDGE_KITCHEN` at tick 84.
+
+### 15.5 Finding #4: the dyes are not free (the coin economy)
+
+`Goblin Diplomacy` cannot be finished with wishes: **Wyson charges 20 GP** for 2 woad leaves and
+**Aggie charges 5 GP per dye**. The engine now declares that cost on the steps themselves
+(`consumes=((COINS_ID, 20),)`, `consumes=(..., (COINS_ID, 5))`) and the module withdraws **one float**
+(`COIN_FLOAT_GP = 512`) from the bot's **own** Stage-2 earnings while it is still parked at the anchor
+bank:
+
+* no operator hand-out, no manual GE purchase — `Zero-Touch` holds;
+* the float is a *single* withdrawal, not a trek per dye;
+* a genuinely coinless account escalates precisely: `SUPPLY_UNSOURCED:Coins`.
+
+### 15.6 Hardening around the cascade
+
+* **Plane-safe descent** (`_descend_to_ground`): any `_walk_and_talk` destination on plane 0 is now
+  reached by climbing down first, with `STUCK_UPSTAIRS:plane_N:<label>` after 12 attempts instead of an
+  infinite orbit. The goal latch and the bank anchor use it too.
+* **QP latch baseline**: the bundle latches on `all_four_done`, or on `quest_points >= target` only if
+  *this run* moved the QP counter. An account that already carried 10+ QP can no longer "complete" the
+  bundle without doing it (`T120`).
+* **Cadava berries** are re-checked up to the Apothecary hand-off (`state < 50`), so a death/relog no
+  longer dead-ends Romeo & Juliet.
+* **`_needed_wool(Varp 179)`**: a single source of truth for "20 at the start, `21 - state` after a
+  partial hand-in".
+
+### 15.7 Verification (`T103..T121`, 19 new tests)
+
+| test | guarantee |
+|---|---|
+| `T103` | `Fill` is never done while the grain is in the bag; nothing downstream is dispatched |
+| `T104` | `Operate` → `Climb-down` respects the settle window (no mid-animation interruption) |
+| `T105` | a hopper that never eats escalates with the exact field string (no infinite loop) |
+| `T106` | a step that only *requires* items (the door) is never latch-gated |
+| `T107` | kernel run: wheat → mill → flour → `Cook` → `Varp 29 = 2`, `+1 QP`, `COMPLETE_TASK` |
+| `T108` | Cook's options selected by verbatim text; unknown option escalates |
+| `T109` | shears → 20 shear actions → climb → 20 spins, all self-served |
+| `T110` | kernel run to `Varp 179 = 21` and `COMPLETE_TASK` |
+| `T111` | Fred's dialogue + live wool demand |
+| `T112` | every Romeo stage targets the right NPC on the right plane |
+| `T113` | lost berries are re-acquired before the Apothecary |
+| `T114` | kernel run to `Varp 144 = 100` (+5 QP), Juliet visited upstairs |
+| `T115` | the dye economy: withdrawal from own GP, precise `SUPPLY_UNSOURCED:Coins` |
+| `T116` | combine order: red+yellow → orange dye → orange mail → blue mail |
+| `T117` | three mails, three searches |
+| `T118` | kernel run to `Varp 62 = 6` (+5 QP) with the verified combine wire order |
+| `T119` | **full `0 → 12 QP`** from an empty bag and an empty supplies bank, zero escalations |
+| `T120` | the QP latch never fires on pre-existing QP |
+| `T121` | Zero-Touch audit: the only bank withdrawal is the bot's own coins |
+
+Full suite: **`129 passed`** (`T01..T121`), `0 failed`.

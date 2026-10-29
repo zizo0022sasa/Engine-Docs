@@ -31,6 +31,7 @@ from osrs_ee.bots.supply_procurement import (
     BLUE_GOBLIN_MAIL_ID,
     BUCKET_OF_MILK_ID,
     CADAVA_BERRIES_ID,
+    COINS_ID,
     EGG_ID,
     GOBLIN_MAIL_ID,
     ORANGE_DYE_ID,
@@ -100,6 +101,15 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         self._bank_audit_done = False
         self._bank_stock: dict[int, int] = {}
         self._bank_source: str = "UNKNOWN"
+        # `PR-20` Zero-Touch coin float: the goblin dyes are NOT free (Wyson 20 GP, Aggie 5 GP each),
+        # so the bot withdraws ONE float from its own banked earnings while it is still parked at the
+        # anchor bank. The operator never supplies GP — this is the bot's own Stage-2 income.
+        self._coin_float_resolved = False
+        self._coin_float_unavailable = False
+        # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
+        # run*, never on QP the account already carried from earlier stages.
+        self._baseline_quest_points: int | None = None
+        self._descend_attempts = 0
 
     @property
     def module_id(self) -> str:
@@ -143,7 +153,7 @@ class TradeUnlockQuestsTaskModule(TaskModule):
     # ------------------------------------------------------------------
     def _goto_anchor_bank(self, ctx: TickContext, reason: str) -> TaskDirective:
         if ctx.position.plane != 0:
-            return self._descend_juliet_stairs(ctx.position)
+            return self._descend_to_ground(ctx.position, reason)
         anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
         if ctx.position.chebyshev_distance(anchor_wp) > 4:
             return TaskDirective(
@@ -209,8 +219,46 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         return set(self.supply.recipes.keys()) | {
             EGG_ID, BUCKET_OF_MILK_ID, POT_OF_FLOUR_ID, BALL_OF_WOOL_ID, CADAVA_BERRIES_ID,
             RED_DYE_ID, YELLOW_DYE_ID, BLUE_DYE_ID, ORANGE_DYE_ID, GOBLIN_MAIL_ID,
-            ORANGE_GOBLIN_MAIL_ID, BLUE_GOBLIN_MAIL_ID,
+            ORANGE_GOBLIN_MAIL_ID, BLUE_GOBLIN_MAIL_ID, COINS_ID,
         }
+
+    COIN_FLOAT_GP = 512
+
+    @staticmethod
+    def _needed_wool(sheep_state: int) -> int:
+        """Balls of wool still required by Sheep Shearer for a given live `Varp 179` value.
+
+        `0` = not started, `1` = accepted, `2..20` = partial hand-in progress, `21` = complete.
+        """
+        state = int(sheep_state)
+        if state >= 21:
+            return 0
+        if state <= 1:
+            return 20
+        return max(0, 21 - state)
+
+    def _ensure_coin_float(self, ctx: TickContext) -> TaskDirective | None:
+        """Withdraw ONE coin float from the bot's own banked GP (`PR-20`).
+
+        Called while the bot is still parked at the anchor bank, so the whole `Goblin Diplomacy`
+        dye budget (20 GP for Wyson + 3 x 5 GP for Aggie) is covered without a single extra trek.
+        Deliberately SOFT: if the account holds no coins at all the bundle keeps going, and the
+        precise `SUPPLY_UNSOURCED:Coins` escalation still fires later, at the dye step that needs it.
+        """
+        if self._coin_float_resolved:
+            return None
+        if _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False) >= self.COIN_FLOAT_GP:
+            self._coin_float_resolved = True
+            return None
+        directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP, "Coins")
+        if directive is None:
+            self._coin_float_resolved = True
+            return None
+        if directive.directive_type == DirectiveType.ESCALATE_HUMAN:
+            self._coin_float_resolved = True
+            self._coin_float_unavailable = True
+            return None
+        return directive
 
     def _procure(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
         """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""
@@ -218,9 +266,12 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             return None
         # `PR-19.4`: everything the cascade needs (bank audit included) lives on the surface, so an
         # underground start must first leave through an AUTHORIZED exit instead of walking across the map.
-        underground_exit = self._authorize_exit_if_underground(ctx, label)
-        if underground_exit is not None:
-            return underground_exit
+        # `PR-20`: EXCEPT when this very item is produced underground (the Lumbridge cellar bucket);
+        # forcing an exit first made the bot descend and get marched straight back out, forever.
+        if not self.supply.recipe_is_underground(item_id):
+            underground_exit = self._authorize_exit_if_underground(ctx, label)
+            if underground_exit is not None:
+                return underground_exit
         audit = self._audit_bank_once(ctx)
         if audit is not None:
             return audit
@@ -321,8 +372,32 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             reason="Romeo & Juliet: climbing down staircase to ground floor (plane 0)",
         )
 
-    @staticmethod
-    def _walk_and_talk(pos: WorldPoint, node_name: str, target_wp: WorldPoint, npc_name: str, label: str) -> TaskDirective:
+    def _descend_to_ground(self, pos: WorldPoint, label: str) -> TaskDirective:
+        """Plane-safe descent (`PR-20`).
+
+        Every `_walk_and_talk` destination except Juliet's balcony is on plane 0. A bot left upstairs
+        (spinning wheel, Juliet's house, the windmill) cannot be routed to a surface node: the
+        navigation engine has no stairs edge, so it would orbit forever. Count the attempts and
+        escalate instead of looping silently.
+        """
+        self._descend_attempts += 1
+        if self._descend_attempts > 12:
+            return TaskDirective(
+                directive_type=DirectiveType.ESCALATE_HUMAN,
+                reason=f"STUCK_UPSTAIRS:plane_{pos.plane}:{label}",
+            )
+        return TaskDirective(
+            directive_type=DirectiveType.INTERACT_OBJECT,
+            payload={"name": "Staircase", "action": "Climb-down"},
+            reason=f"{label}: descending from plane {pos.plane} to the ground floor",
+        )
+
+    def _walk_and_talk(
+        self, pos: WorldPoint, node_name: str, target_wp: WorldPoint, npc_name: str, label: str
+    ) -> TaskDirective:
+        if pos.plane > target_wp.plane:
+            # `PR-20`: never ask the router for a surface node while standing upstairs.
+            return self._descend_to_ground(pos, label)
         if pos.plane != target_wp.plane or pos.chebyshev_distance(target_wp) > 4:
             dest: str | WorldPoint = node_name if target_wp.plane == 0 else target_wp
             return TaskDirective(
@@ -337,6 +412,8 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         )
 
     def evaluate_tick(self, ctx: TickContext) -> TaskDirective:
+        if ctx.position.plane == 0:
+            self._descend_attempts = 0
         if ctx.tutorial_varp_281 < 1000:
             return TaskDirective(
                 directive_type=DirectiveType.ESCALATE_HUMAN,
@@ -346,17 +423,23 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         if ctx.dialogue_open:
             return self._handle_quest_dialogue(ctx)
 
+        if self._baseline_quest_points is None:
+            self._baseline_quest_points = int(ctx.quest_points)
+
         cook_state = int(ctx.varps.get(VARP_COOKS_ASSISTANT, 0))
         sheep_state = int(ctx.varps.get(VARP_SHEEP_SHEARER, 0))
         romeo_state = int(ctx.varps.get(VARP_ROMEO_AND_JULIET, 0))
         goblin_state = int(ctx.varps.get(VARP_GOBLIN_DIPLOMACY, 0))
 
         all_four_done = cook_state >= 2 and sheep_state >= 21 and romeo_state >= 100 and goblin_state >= 6
+        # `PR-20`: the goal latch must never fire on QP the account already carried. The mission is
+        # defined by the four quest varps; total QP only counts when THIS run moved it.
+        qp_progressed = int(ctx.quest_points) > int(self._baseline_quest_points or 0)
 
         # 1. Immediate QP Goal Latch (`quest_points >= 10` or all 4 quests complete -> home & bank!)
-        if ctx.quest_points >= self.target_quest_points or all_four_done:
+        if all_four_done or (qp_progressed and ctx.quest_points >= self.target_quest_points):
             if ctx.position.plane != 0:
-                return self._descend_juliet_stairs(ctx.position)
+                return self._descend_to_ground(ctx.position, "Stage 1A latch")
             anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
             if ctx.position.chebyshev_distance(anchor_wp) > 4:
                 return TaskDirective(
@@ -375,7 +458,13 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 reason=f"Stage 1A Quest Bundle completed (QP={ctx.quest_points}) and anchored at {self.anchor_bank_node}",
             )
 
-        # 2. Quest 1: Cook's Assistant (1 QP)
+        # 2. Zero-Touch coin float (`PR-20`): one withdrawal at the anchor bank covers every dye.
+        if not all_four_done:
+            float_directive = self._ensure_coin_float(ctx)
+            if float_directive is not None:
+                return float_directive
+
+        # 3. Quest 1: Cook's Assistant (1 QP)
         if cook_state < 2:
             if cook_state == 0:
                 prep = self._ensure_supplies_at_anchor(
@@ -399,7 +488,7 @@ class TradeUnlockQuestsTaskModule(TaskModule):
 
         # 3. Quest 2: Sheep Shearer (1 QP, Varp 179: 0 -> 1 -> 2..20 -> 21)
         if sheep_state < 21:
-            wool_needed = 20 if sheep_state <= 1 else max(0, 21 - sheep_state)
+            wool_needed = self._needed_wool(sheep_state)
             if wool_needed > 0:
                 prep = self._ensure_supplies_at_anchor(
                     ctx,
@@ -418,7 +507,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
 
         # 4. Quest 3: Romeo & Juliet (5 QP, Varp 144: 0 -> 10 -> 20 -> 30 -> 40 -> 50 -> 60 -> 100)
         if romeo_state < 100:
-            if romeo_state == 0:
+            # `PR-20`: the berries are needed up to the Apothecary hand-off (state 40 -> 50). Asking
+            # only at state 0 left a relog/death with no berries and no way to finish the quest.
+            if romeo_state < 50:
                 prep = self._ensure_supplies_at_anchor(
                     ctx,
                     [{"item_id": 753, "name": "Cadava berries", "quantity": 1}],

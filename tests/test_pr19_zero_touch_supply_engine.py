@@ -174,6 +174,10 @@ def test_t70_zero_touch_engine_recursion_repeat_gather_and_stall_escalation() ->
     # -> Flour bin). The world advances the player's plane exactly like the client would.
     seen: list[str] = []
     plane = 0
+    mill_inv: list[dict[str, Any]] = [
+        {"item_id": 1947, "name": "Grain", "quantity": 1},
+        {"item_id": POT_ID, "name": "Pot", "quantity": 1},
+    ]
     for _tick in range(1, 200):
         ctx_i = _ctx(
             position=WorldPoint(
@@ -181,19 +185,25 @@ def test_t70_zero_touch_engine_recursion_repeat_gather_and_stall_escalation() ->
                 DEFAULT_WORLD_NODES["LUMBRIDGE_WINDMILL_TOP"].y if plane == 2 else DEFAULT_WORLD_NODES["MILL_LANE_MILL"].y,
                 plane,
             ),
-            inventory=(
-                {"item_id": 1947, "name": "Grain", "quantity": 1},
-                {"item_id": POT_ID, "name": "Pot", "quantity": 1},
-            ),
+            inventory=tuple(mill_inv),
+            game_tick=_tick,
         )
         d = flour_engine.ensure(ctx_i, POT_OF_FLOUR_ID, 1)
-        assert d is not None
+        if d is None:
+            break  # `PR-20`: the flour exists, the chain is genuinely finished
         if d.directive_type == DirectiveType.INTERACT_OBJECT:
             name = str(d.payload.get("name"))
             action = str(d.payload.get("action"))
             seen.append(name)
             if name in ("Ladder", "Staircase", "Stairs"):
                 plane = 2 if action == "Climb-up" else 0
+            # `PR-20`: the WORLD consumes here — the hopper eats the grain, the bin eats the pot.
+            # A step is only complete once the engine can observe that on a later tick.
+            if name == "Hopper":
+                mill_inv = [it for it in mill_inv if int(it["item_id"]) != 1947]
+            if name == "Flour bin":
+                mill_inv = [it for it in mill_inv if int(it["item_id"]) != POT_ID]
+                mill_inv.append({"item_id": POT_OF_FLOUR_ID, "name": "Pot of flour", "quantity": 1})
         if d.directive_type == DirectiveType.ESCALATE_HUMAN:
             break
     assert seen.count("Hopper") == 1, f"hopper must be filled once, got {seen}"
@@ -348,16 +358,25 @@ def _zero_touch_world(command_type: str, payload: dict[str, Any], adapter: FakeG
     name = str(payload.get("name", ""))
     if command_type in ("INTERACT_NPC",):
         if name == "Wyson the gardener":
-            add(WOAD_LEAF_ID, "Woad leaves", 2)
+            # `PR-20`: 2 woad leaves cost 20 GP (paid from the bot's own withdrawn coins).
+            if inv.get(995, 0) >= 20:
+                take(995, 20)
+                add(WOAD_LEAF_ID, "Woad leaves", 2)
         elif name == "Aggie":
+            # `PR-20`: Aggie charges 5 GP per dye.
+            if inv.get(995, 0) < 5:
+                return
             if inv.get(WOAD_LEAF_ID, 0) >= 2:
                 take(WOAD_LEAF_ID, 2)
+                take(995, 5)
                 add(BLUE_DYE_ID, "Blue dye")
             elif inv.get(ONION_ID, 0) >= 2:
                 take(ONION_ID, 2)
+                take(995, 5)
                 add(YELLOW_DYE_ID, "Yellow dye")
             elif inv.get(REDBERRY_ID, 0) >= 3:
                 take(REDBERRY_ID, 3)
+                take(995, 5)
                 add(RED_DYE_ID, "Red dye")
         elif name == "Sheep":
             if inv.get(SHEARS_ID, 0) >= 1:
@@ -471,7 +490,10 @@ def test_t72_e2e_12qp_from_empty_bank_with_zero_operator_input(tmp_path: Path) -
         tutorial_varp_281=1000,
         total_level=35,
         playtime_minutes=200,
-        bank_items=[],          # ZERO supplies banked — the whole point of the mandate
+        # ZERO **supplies** banked — the whole point of the mandate. The only banked asset is the
+        # bot's OWN earnings (10,000 GP banked by Stage 2 Stronghold on the live account), because
+        # `PR-20` proved the dyes are not free: Wyson charges 20 GP and Aggie 5 GP per dye.
+        bank_items=[{"item_id": 995, "name": "Coins", "quantity": 10_000, "noted": False}],
         inventory_items=[],     # ZERO supplies carried
         interaction_grants=_zero_touch_world,
     )

@@ -107,6 +107,10 @@ def test_t99_mill_chain_runs_in_order_once_per_step_without_stair_ping_pong() ->
         sequence.append((name, action))
         if name in ("Ladder", "Staircase", "Stairs"):
             plane = 2 if action == "Climb-up" else 0
+        if name == "Hopper":
+            # `PR-20`: the real hopper DESTROYS the grain. The engine may only advance to `Operate`
+            # once it has observed that destruction on a later tick.
+            inventory = [it for it in inventory if int(it["item_id"]) != GRAIN_ID]
         if len(sequence) >= 7:
             break
 
@@ -222,6 +226,14 @@ def test_t102_kernel_run_produces_pot_of_flour_end_to_end(tmp_path: Path) -> Non
             cur = dict(adapter.position)
             cur["plane"] = 2 if action == "Climb-up" else 0
             adapter.position = cur
+        elif name == "Hopper":
+            # `PR-20`: filling the hopper consumes the grain (field tick 289-349 regression).
+            for it in list(adapter.inventory_items):
+                if int(it["item_id"]) == GRAIN_ID:
+                    it["quantity"] -= 1
+                    if it["quantity"] <= 0:
+                        adapter.inventory_items.remove(it)
+                    break
         elif name == "Flour bin":
             assert payload.get("id") == 1781
             for it in list(adapter.inventory_items):
