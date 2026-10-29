@@ -123,3 +123,46 @@ Telegram alert on `COMPLETE_TASK`.
 1. `Acc_02` must start **logged in, standing at the GE, bank closed**.
 2. Watch the first 40 ticks: `BANK_TURNAROUND(open_only)` → `WAIT_NEXT_TICK` (audit) → `NAVIGATE_TO`.
 3. Any `ESCALATE_HUMAN` carries an exact reason string — copy it verbatim into the field log.
+
+---
+
+## 9. `PR-19.1` — Field remediation from the live `acc_02` run (tick 337)
+
+### What the field proved
+The first live run took the bot from the GE all the way to `(3134, 3401)` — 120 healthy walk ticks,
+10/10 HP, zero operator input — and then **wrongly self-halted**:
+
+```
+SUPPLY_AREA_UNREACHABLE:LUMBRIDGE_CHICKEN_COOP
+```
+
+Root cause: `max_walk_attempts = 120` counted **ticks**, not **progress**. A 210-tile GE → Lumbridge
+trek legitimately needs ~180 ticks once the run bar is empty, so the guard fired on a perfectly
+healthy route. The guard was measuring *duration* when the question was *blocked or not*.
+
+### The three surgical fixes
+
+| # | Fix | Before | After |
+|---|-----|--------|-------|
+| 1 | **Progress-aware walk guard** | escalate after `120` walk ticks | `_walk_progressed()` keeps a per-step **best distance**; every new best **resets** the counter. Only ticks with **no** distance reduction accumulate, against a `350` no-progress backstop |
+| 2 | **Run-aware travel** | run handled only globally by the watchdog (`>= 15%`) | while routing, the engine itself returns `SET_RUN_MODE {enabled: true}` as soon as `run_energy_pct >= run_min_energy_pct` (**20%**), and stays silent when run is already on (`POST /run`) |
+| 3 | **Plane-safe climbing** *(defect found while verifying Sheep Shearer)* | the `Lumbridge Castle` spinning wheel sits on **plane 1**; the bot would have walked forever at its ground-floor twin | new `CLIMB` step kind: climb the north staircase, then `Spin` on plane 1 — with `SUPPLY_CLIMB_FAILED` as the precise diagnostic |
+
+Both fixes are **strictly anti-false-positive**: a genuinely blocked route still escalates
+(`T75b`, `T76` — including distance *oscillation*, which does not count as progress), so the safety
+property is preserved, not weakened.
+
+### New verification (`87 passed`)
+
+| Test | Proves |
+|---|---|
+| `T75` | the exact field trek (GE → coop) survives **181 walk ticks** with zero escalation |
+| `T75b` | a frozen bot at the field position `(3134, 3401)` still stops, with the exact old reason string |
+| `T76` | rubber-banding between two tiles is **not** progress → still escalates |
+| `T77` | run re-enabled at `>= 20%`, silent at `19%`, silent when already running, silent when the adapter reports `None` |
+| `T78` | plane-1 supply uses `CLIMB`; `Spin` is never emitted from the ground floor; climb failure escalates precisely |
+| `T79` | full kernel run with a drained bar + `2 tiles/tick` realistic client speed: long trek, **2×** `SET_RUN_MODE` (boot + recovery), egg collected, no `SUPPLY_AREA_UNREACHABLE` |
+
+Test-facility addition: `FakeGameAdapter(walk_speed_tiles_per_tick=N)` now models a real client that
+keeps walking between ticks (default `None` = legacy instant teleport, so all 81 previous tests are
+byte-identical), plus faithful Jagex behaviour where an empty run bar auto-disables run.

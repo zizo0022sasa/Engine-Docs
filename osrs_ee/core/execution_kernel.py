@@ -279,6 +279,8 @@ class ExecutionEngineKernel:
         hp_curr_val = _coalesce_int(raw_vitals.get("hp_current"), hp_max_val)
         run_energy_val = _coalesce_int(raw_vitals.get("run_energy"), 100)
         run_enabled_val = bool(raw_vitals.get("run_enabled", False))
+        raw_run_energy = raw_vitals.get("run_energy")
+        run_energy_opt = int(raw_run_energy) if isinstance(raw_run_energy, (int, float)) else None
         under_attack_val = bool(raw_vitals.get("under_attack", False))
         inv_items = obs["inventory"]["items"] or []
 
@@ -412,6 +414,8 @@ class ExecutionEngineKernel:
             bank_is_open=bank_is_open,
             bank_items=bank_items_tuple,
             in_danger=safety.in_danger,
+            run_energy_pct=run_energy_opt,
+            run_enabled=run_enabled_val,
         )
         directive = task_module.evaluate_tick(ctx)
 
@@ -466,6 +470,16 @@ class ExecutionEngineKernel:
                 postcondition_checker=lambda _post: True,
             )
             dispatched.append("USE_ITEM_ON_ITEM")
+
+        elif directive.directive_type == DirectiveType.SET_RUN_MODE:
+            self.gate.dispatch_pipelined_command(
+                intent=self._make_intent(
+                    "SET_RUN_MODE",
+                    {"enabled": bool(dict(directive.payload).get("enabled", True))},
+                    idempotency_class="IDEMPOTENT",
+                )
+            )
+            dispatched.append("SET_RUN_MODE")
 
         elif directive.directive_type == DirectiveType.TAKE_GROUND_ITEM:
             self.gate.dispatch_verified_command(

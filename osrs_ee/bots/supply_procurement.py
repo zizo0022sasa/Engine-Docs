@@ -24,6 +24,16 @@ Design invariants:
 - No `time.sleep`, no HTTP, no sockets — returns declarative `TaskDirective` only.
 - Stall detection per `(item, step)`: alias rotation, then precise `SUPPLY_STEP_STALLED` escalation
   so the field operator gets an exact, actionable diagnostic line instead of a silent bank loop.
+
+`PR-19.1` field fixes (from the live `acc_02` run, tick 337):
+- **Progress-aware walk guard**: the walk budget counts only ticks in which the distance to the target
+  did NOT shrink. A healthy 210-tile GE -> Lumbridge trek can never be aborted again; a genuinely
+  blocked route (no distance reduction) still escalates with `SUPPLY_AREA_UNREACHABLE`.
+- **Run-aware travel**: while routing, the engine re-enables run (`SET_RUN_MODE`) as soon as the bar
+  recovers to `run_min_energy_pct` (20%), and stays silent when run is already on (never spams).
+- **Plane-safe climbing**: `CLIMB` steps move the bot between floors (Lumbridge Castle spinning wheel
+  lives on plane 1) instead of demanding a walk to an unreachable tile, with
+  `SUPPLY_CLIMB_FAILED` as the precise diagnostic when a staircase cannot be used.
 """
 
 from __future__ import annotations
@@ -71,6 +81,7 @@ class SupplyStepKind(StrEnum):
     OBJECT = "OBJECT"
     NPC = "NPC"
     COMBINE = "COMBINE"
+    CLIMB = "CLIMB"
 
 
 @dataclass(frozen=True)
@@ -83,6 +94,8 @@ class SupplyStep:
     action: str = ""
     partner_id: int | None = None
     combine_source_id: int | None = None
+    # CLIMB only: the plane this step must reach (e.g. Lumbridge Castle spinning wheel = plane 1).
+    target_plane: int = 0
     # `(item_id, cumulative_quantity)` achieved when this step has completed at least once.
     produces: tuple[tuple[int, int], ...] = ()
     # Items that MUST be in inventory before this step can run (recursively procured).
@@ -249,6 +262,14 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=BALL_OF_WOOL_ID,
         label="Ball of wool",
         steps=(
+            SupplyStep(
+                kind=SupplyStepKind.CLIMB,
+                area=_at("LUMBRIDGE_CASTLE_NORTH_STAIRS"),
+                targets=("Staircase", "Stairs", "Ladder"),
+                action="Climb-up",
+                target_plane=1,
+                note="Lumbridge Castle north staircase -> 1st floor (spin wheel is NOT reachable on plane 0)",
+            ),
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
                 area=_at("LUMBRIDGE_SPINNING_WHEEL", plane=1),
@@ -470,14 +491,19 @@ class ZeroTouchSupplyEngine:
     recipes: Mapping[int, SupplyRecipe] = field(default_factory=lambda: SUPPLY_RECIPES)
     walk_tolerance: int = 3
     max_step_attempts: int = MAX_STEP_ATTEMPTS
-    # A 400-tile surface trek needs ~100 ticks; 120 strikes prove the area is genuinely unreachable
-    # (the NavigationEngine independently blacklists + reroutes jammed edges inside that budget).
-    max_walk_attempts: int = 120
+    max_climb_attempts: int = 12
+    # `PR-19.1` field fix: this budget now counts *stalled* walk ticks (ticks with ZERO reduction in
+    # distance to the target), NOT total walk ticks. The live run proved the old 120-tick cap aborted a
+    # perfectly healthy 210-tile GE -> Lumbridge trek at tick 337 while the bot was still progressing.
+    max_walk_attempts: int = 350
+    # Re-enable run while travelling once the bar recovers past this percentage.
+    run_min_energy_pct: int = 20
     _attempts: dict[tuple[int, int], int] = field(default_factory=dict)
     _alias_cursor: dict[tuple[int, int], int] = field(default_factory=dict)
     _progress: dict[tuple[int, int], int] = field(default_factory=dict)
     _done: set[tuple[int, int]] = field(default_factory=set)
     _walk_attempts: dict[tuple[int, int], int] = field(default_factory=dict)
+    _walk_best_distance: dict[tuple[int, int], float] = field(default_factory=dict)
     _emitted: set[tuple[int, int]] = field(default_factory=set)
     _active_item_id: int | None = None
     _escalation: str = ""
@@ -560,20 +586,41 @@ class ZeroTouchSupplyEngine:
                         return nested
                     continue
                 return self._ensure(ctx, needed_id, needed_qty, depth=depth + 1)
+            # CLIMB is resolved before the surface area gate: once we are on the target plane there is
+            # nothing left to do, and walking back down to the stair tile would be a ping-pong bug.
+            if step.kind == SupplyStepKind.CLIMB:
+                if ctx.position.plane == step.target_plane:
+                    continue
+                if ctx.bank_is_open:
+                    return TaskDirective(
+                        directive_type=DirectiveType.BANK_TURNAROUND,
+                        payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                        reason=f"Zero-Touch supply: closing bank before climbing for {recipe.label}",
+                    )
+                climbs = self._walk_attempts.get(key, 0) + 1
+                self._walk_attempts[key] = climbs
+                if climbs > self.max_climb_attempts:
+                    return self._escalate(f"SUPPLY_CLIMB_FAILED:{step.area.label if step.area else recipe.label}")
+                return TaskDirective(
+                    directive_type=DirectiveType.INTERACT_OBJECT,
+                    payload={
+                        "name": self._pick_alias(recipe.item_id, idx, step),
+                        "action": step.action or "Climb-up",
+                    },
+                    reason=f"Zero-Touch supply: climbing to plane {step.target_plane} for {recipe.label}",
+                )
+
             # Travel is implicit: any step with an `area` first walks there (never a standalone step).
             if step.area is not None and not self._at_area(ctx, step):
+                if self._walk_progressed(ctx, step, key):
+                    # Distance to the destination is still shrinking -> the trek is HEALTHY, no matter
+                    # how long it takes. Never escalate a bot that is provably making progress.
+                    return self._travel(ctx, step, recipe)
                 walks = self._walk_attempts.get(key, 0) + 1
                 self._walk_attempts[key] = walks
                 if walks > self.max_walk_attempts:
                     return self._escalate(f"SUPPLY_AREA_UNREACHABLE:{step.area.label or step.area}")
-                dest: str | WorldPoint = (
-                    step.area.label if step.area.label in DEFAULT_WORLD_NODES else step.area
-                )
-                return TaskDirective(
-                    directive_type=DirectiveType.NAVIGATE_TO,
-                    destination=dest,
-                    reason=f"Zero-Touch supply: walking to {step.area.label or step.area} for {recipe.label}",
-                )
+                return self._travel(ctx, step, recipe)
             # In-world / inventory interactions cannot run while the bank interface is open
             # (`Rs2Inventory.invokeMenu` re-targets to the bank container).
             if ctx.bank_is_open:
@@ -609,6 +656,13 @@ class ZeroTouchSupplyEngine:
                 f"SUPPLY_STEP_STALLED:{recipe.label}:{step.kind}:{step.targets[0] if step.targets else recipe.label}"
             )
 
+        if step.kind == SupplyStepKind.PICKUP:
+            return TaskDirective(
+                directive_type=DirectiveType.TAKE_GROUND_ITEM,
+                payload={"name": self._pick_alias(recipe.item_id, idx, step), "action": step.action or "Take"},
+                reason=f"Zero-Touch supply: taking {recipe.label} ({step.note})",
+            )
+
         if step.kind == SupplyStepKind.OBJECT:
             return TaskDirective(
                 directive_type=DirectiveType.INTERACT_OBJECT,
@@ -637,6 +691,48 @@ class ZeroTouchSupplyEngine:
             )
 
         return self._escalate(f"SUPPLY_UNKNOWN_STEP_KIND:{step.kind}")
+
+    def _walk_progressed(self, ctx: TickContext, step: SupplyStep, key: tuple[int, int]) -> bool:
+        """True when the chebyshev distance to the step area shrank since the best tick seen so far."""
+        assert step.area is not None
+        if ctx.position.plane != step.area.plane:
+            # A plane mismatch can only be fixed by a CLIMB step; it is never "progress".
+            return False
+        dist = float(ctx.position.chebyshev_distance(step.area))
+        best = self._walk_best_distance.get(key)
+        if best is None or dist < best - 0.5:
+            self._walk_best_distance[key] = dist
+            self._walk_attempts[key] = 0
+            return True
+        return False
+
+    def _destination(self, step: SupplyStep) -> str | WorldPoint:
+        """Node id for surface targets (graph routing), raw point for upper floors (local micro-route)."""
+        assert step.area is not None
+        if step.area.plane != 0 or step.area.label not in DEFAULT_WORLD_NODES:
+            return step.area
+        return step.area.label
+
+    def _travel(self, ctx: TickContext, step: SupplyStep, recipe: SupplyRecipe) -> TaskDirective:
+        """Walk toward `step.area`, re-enabling run first whenever the bar has recovered."""
+        if (
+            ctx.run_energy_pct is not None
+            and ctx.run_energy_pct >= self.run_min_energy_pct
+            and not ctx.run_enabled
+        ):
+            return TaskDirective(
+                directive_type=DirectiveType.SET_RUN_MODE,
+                payload={"enabled": True},
+                reason=(
+                    f"Zero-Touch travel: run energy {ctx.run_energy_pct}% >= {self.run_min_energy_pct}% "
+                    f"while routing to {step.area.label if step.area else recipe.label}"
+                ),
+            )
+        return TaskDirective(
+            directive_type=DirectiveType.NAVIGATE_TO,
+            destination=self._destination(step),
+            reason=f"Zero-Touch supply: walking to {step.area.label or step.area} for {recipe.label}",
+        )
 
     def _at_area(self, ctx: TickContext, step: SupplyStep) -> bool:
         assert step.area is not None

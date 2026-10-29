@@ -30,6 +30,7 @@ class FakeGameAdapter:
         inventory_items: list[dict[str, Any]] | None = None,
         equipment_items: list[str] | None = None,
         ground_items: list[dict[str, Any]] | None = None,
+        walk_speed_tiles_per_tick: int | None = None,
         interaction_grants: Callable[[str, dict[str, Any], "FakeGameAdapter"], None] | None = None,
         combat_level: int | None = None,
         is_member: bool = False,
@@ -73,6 +74,9 @@ class FakeGameAdapter:
         self.hp_max: int = int(self.skills.get("hitpoints", 10))
         self.run_energy: int = 100
         self.run_enabled: bool = False
+        # `None` = legacy instant teleport; an int = simulate a real client walk speed (PR-19.1).
+        self.walk_speed_tiles_per_tick: int | None = walk_speed_tiles_per_tick
+        self._walk_target: tuple[int, int, int] | None = None
         self.under_attack: bool = False
         self.transient_disconnect: bool = False
         self._pending_heal_on_tick: tuple[int, int] | None = None  # (target_tick, heal_amount)
@@ -101,6 +105,11 @@ class FakeGameAdapter:
     def advance_tick(self, steps: int = 1) -> None:
         if self.alive and not self.freeze_ticks:
             self.game_tick += steps
+            # A real RuneLite client keeps walking toward the last commanded tile every tick.
+            # Only active when `walk_speed_tiles_per_tick` is set (legacy tests still teleport).
+            if self.walk_speed_tiles_per_tick is not None and self._walk_target is not None:
+                for _ in range(steps):
+                    self._step_towards_walk_target()
             if self._pending_heal_on_tick is not None:
                 due_tick, heal_amt = self._pending_heal_on_tick
                 if self.game_tick >= due_tick and not self.player_dead:
@@ -371,11 +380,16 @@ class FakeGameAdapter:
             return {"ok": True}
 
         if command_type == "WALK_TO_WORLD_POINT":
-            self.position = {
-                "x": int(payload["x"]),
-                "y": int(payload["y"]),
-                "plane": int(payload.get("plane", 0)),
-            }
+            tx, ty = int(payload["x"]), int(payload["y"])
+            tplane = int(payload.get("plane", 0))
+            if self.walk_speed_tiles_per_tick is None:
+                self.position = {"x": tx, "y": ty, "plane": tplane}
+            else:
+                self._walk_target = (tx, ty, tplane)
+                self._step_towards_walk_target()
+                # Realistic RuneLite pathing: the character walks a few tiles per tick instead of
+                # teleporting (default teleport keeps every legacy test byte-identical).
+            self.run_energy = max(0, self.run_energy - 1) if self.run_enabled else min(100, self.run_energy + 1)
             return {"ok": True}
 
         if command_type == "SET_RUN_MODE":
@@ -478,6 +492,23 @@ class FakeGameAdapter:
             return {"ok": True, "clicked": True}
 
         raise ValueError(f"Unsupported command_type on FakeGameAdapter: {command_type}")
+
+    def _step_towards_walk_target(self) -> None:
+        if self._walk_target is None:
+            return
+        tx, ty, tplane = self._walk_target
+        speed = max(1, int(self.walk_speed_tiles_per_tick or 1))
+        cur = self.position
+        cx, cy = int(cur["x"]), int(cur["y"])
+        dx = max(-speed, min(speed, tx - cx))
+        dy = max(-speed, min(speed, ty - cy))
+        self.position = {"x": cx + dx, "y": cy + dy, "plane": tplane if int(cur["plane"]) == tplane else int(cur["plane"])}
+        if cx + dx == tx and cy + dy == ty and int(self.position["plane"]) == tplane:
+            self._walk_target = None
+        self.run_energy = max(0, self.run_energy - 1) if self.run_enabled else min(100, self.run_energy + 1)
+        # Jagex behaviour: run auto-disables the moment the bar empties; it must then be re-enabled.
+        if self.run_energy == 0:
+            self.run_enabled = False
 
     def _add_to_bank(self, item: dict[str, Any]) -> None:
         for b in self.bank_items:

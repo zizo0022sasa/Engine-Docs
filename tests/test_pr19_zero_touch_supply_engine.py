@@ -180,8 +180,9 @@ def test_t70_zero_touch_engine_recursion_repeat_gather_and_stall_escalation() ->
     assert "Hopper controls" in seen and "Flour bin" in seen
 
     # --- 6. dead end -> exact, actionable escalation instead of a silent loop ---
+    # PR-19.1: the walk budget now counts ONLY stalled ticks and the hard cap is 350 no-progress ticks.
     stuck = ZeroTouchSupplyEngine()
-    for _ in range(200):
+    for _ in range(420):
         d = stuck.ensure(_ctx(position=WorldPoint(3200, 3300, 0)), CADAVA_BERRIES_ID, 1)
         if d is not None and d.directive_type == DirectiveType.ESCALATE_HUMAN:
             break

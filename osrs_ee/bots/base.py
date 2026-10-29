@@ -26,6 +26,7 @@ class DirectiveType(StrEnum):
     INTERACT_NPC = "INTERACT_NPC"
     USE_ITEM_ON_ITEM = "USE_ITEM_ON_ITEM"
     TAKE_GROUND_ITEM = "TAKE_GROUND_ITEM"
+    SET_RUN_MODE = "SET_RUN_MODE"
     CLICK_WIDGET = "CLICK_WIDGET"
     SELECT_DIALOGUE = "SELECT_DIALOGUE"
     CONTINUE_DIALOGUE = "CONTINUE_DIALOGUE"
@@ -55,6 +56,10 @@ class TickContext:
     bank_is_open: bool = False
     bank_items: tuple[Mapping[str, Any], ...] = ()
     in_danger: bool = False
+    # Live run telemetry (`PR-19.1`): `None` means "the adapter did not report it", which must never
+    # be collapsed into `0` or `False` (never assume a drained run bar).
+    run_energy_pct: int | None = None
+    run_enabled: bool = False
 
 
 @dataclass(frozen=True)
