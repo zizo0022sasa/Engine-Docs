@@ -40,6 +40,7 @@ from osrs_ee.bots.supply_procurement import (
     YELLOW_DYE_ID,
     ZeroTouchSupplyEngine,
 )
+from osrs_ee.navigation.underground import classify_underground
 from osrs_ee.navigation.waypoint_graph import WorldPoint
 
 VARP_COOKS_ASSISTANT = 29
@@ -179,6 +180,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""
         if _inv_count(ctx.inventory_items, item_id=item_id, noted=False) >= quantity:
             return None
+        # `PR-19.4`: everything the cascade needs (bank audit included) lives on the surface, so an
+        # underground start must first leave through an AUTHORIZED exit instead of walking across the map.
+        underground_exit = self._authorize_exit_if_underground(ctx, label)
+        if underground_exit is not None:
+            return underground_exit
         audit = self._audit_bank_once(ctx)
         if audit is not None:
             return audit
@@ -201,6 +207,12 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             directive_type=DirectiveType.ESCALATE_HUMAN,
             reason=f"SUPPLY_UNSOURCED:{label}",
         )
+
+    def _authorize_exit_if_underground(self, ctx: TickContext, label: str) -> TaskDirective | None:
+        """Return an `AUTHORIZE_SURFACE_EXIT` directive while the bot is below ground, else `None`."""
+        if not classify_underground(ctx.position.x, ctx.position.y):
+            return None
+        return self.supply.ensure_underground_exit(ctx, label)
 
     def _procure_nested(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
         """Bank-aware recursion hook injected into the supply engine (ingredients too!)."""

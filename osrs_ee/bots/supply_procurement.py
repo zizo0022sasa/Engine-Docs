@@ -36,6 +36,9 @@ Design invariants:
 - **Plane-safe climbing**: `CLIMB` steps move the bot between floors (Lumbridge Castle spinning wheel
   lives on plane 1) instead of demanding a walk to an unreachable tile, with
   `SUPPLY_CLIMB_FAILED` as the precise diagnostic when a staircase cannot be used.
+- **`PR-19.4` authorized exits**: `EXIT_UNDERGROUND` steps leave caves/cellars through an explicit
+  `AUTHORIZE_SURFACE_EXIT` (the Stronghold pattern), and the engine refuses to walk from `y >= 5000`
+  to a surface tile without one (`SUPPLY_EXIT_REQUIRED`).
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from enum import StrEnum
 from typing import Any, Callable, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TickContext
+from osrs_ee.navigation.underground import classify_underground, exit_for
 from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
 
 # ---------------------------------------------------------------------------
@@ -84,6 +88,7 @@ class SupplyStepKind(StrEnum):
     NPC = "NPC"
     COMBINE = "COMBINE"
     CLIMB = "CLIMB"
+    EXIT_UNDERGROUND = "EXIT_UNDERGROUND"
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,13 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 action="Take",
                 produces=((BUCKET_ID, 1),),
                 note="bucket spawn in the Lumbridge Castle basement (3216,9625)",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.EXIT_UNDERGROUND,
+                area=_at("LUMBRIDGE_CASTLE_BASEMENT"),
+                targets=("Staircase", "Stairs", "Ladder"),
+                action="Climb-up",
+                note="kitchen staircase out of the cellar (authorized surface exit)",
             ),
         ),
     ),
@@ -588,6 +600,20 @@ class ZeroTouchSupplyEngine:
                         return nested
                     continue
                 return self._ensure(ctx, needed_id, needed_qty, depth=depth + 1)
+            # `PR-19.4`: leaving a cave/basement is an AUTHORIZED exit, never accidental displacement.
+            # Handled before the area gate so the bot never tries to walk to a surface tile from y>=5000.
+            if step.kind == SupplyStepKind.EXIT_UNDERGROUND:
+                if not classify_underground(ctx.position.x, ctx.position.y):
+                    continue  # already on the surface
+                return self._emit_underground_exit(
+                    ctx,
+                    key,
+                    label=recipe.label,
+                    targets=step.targets or ("Staircase", "Stairs", "Ladder"),
+                    action=step.action or "Climb-up",
+                    area_label=step.area.label if step.area else "",
+                )
+
             # CLIMB is resolved before the surface area gate: once we are on the target plane there is
             # nothing left to do, and walking back down to the stair tile would be a ping-pong bug.
             if step.kind == SupplyStepKind.CLIMB:
@@ -613,6 +639,21 @@ class ZeroTouchSupplyEngine:
                 )
 
             # Travel is implicit: any step with an `area` first walks there (never a standalone step).
+            if (
+                step.area is not None
+                and ctx.position.y >= 5000
+                and step.area.y < 5000
+                and not self._at_area(ctx, step)
+            ):
+                # Any requested item may be produced on the surface, so leaving the cave is mandatory.
+                # The registered exit route makes this an AUTHORIZED action (never accidental
+                # displacement); if no route is registered for this region we fail loudly instead of
+                # issuing a 40-minute `/walk` across the map.
+                registered = exit_for(ctx.position.x, ctx.position.y)
+                if registered is None:
+                    return self._escalate(f"SUPPLY_EXIT_REQUIRED:{recipe.label}")
+                return self._emit_underground_exit(ctx, (recipe.item_id, -1), label=recipe.label)
+
             if step.area is not None and not self._at_area(ctx, step):
                 if self._walk_progressed(ctx, step, key):
                     # Distance to the destination is still shrinking -> the trek is HEALTHY, no matter
@@ -707,6 +748,44 @@ class ZeroTouchSupplyEngine:
             self._walk_attempts[key] = 0
             return True
         return False
+
+    def ensure_underground_exit(self, ctx: TickContext, label: str = "") -> TaskDirective:
+        """Public entry point: leave whatever cave/cellar the bot is standing in, authorized."""
+        return self._emit_underground_exit(ctx, (-1, -1), label=label or "surface travel")
+
+    def _emit_underground_exit(
+        self,
+        ctx: TickContext,
+        key: tuple[int, int],
+        *,
+        label: str,
+        targets: tuple[str, ...] = ("Staircase", "Stairs", "Ladder"),
+        action: str = "Climb-up",
+        area_label: str = "",
+    ) -> TaskDirective:
+        """Leave a cave/cellar through its own staircase, explicitly authorized for the watchdog."""
+        if ctx.bank_is_open:
+            return TaskDirective(
+                directive_type=DirectiveType.BANK_TURNAROUND,
+                payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                reason=f"Zero-Touch supply: closing bank before leaving {area_label} for {label}",
+            )
+        registered = exit_for(ctx.position.x, ctx.position.y)
+        if registered is not None:
+            targets, action, area_label = registered.targets, registered.action, registered.region
+        area_label = area_label or "underground"
+        exits = self._walk_attempts.get(key, 0) + 1
+        self._walk_attempts[key] = exits
+        if exits > self.max_climb_attempts:
+            return self._escalate(f"SUPPLY_EXIT_BLOCKED:{area_label}")
+        name = targets[min(len(targets) - 1, (exits - 1) // 6)] if targets else "Staircase"
+        return TaskDirective(
+            directive_type=DirectiveType.AUTHORIZE_SURFACE_EXIT,
+            payload={"name": name, "action": action},
+            reason=(
+                f"Zero-Touch supply: climbing out of {area_label} for {label} (authorized surface exit)"
+            ),
+        )
 
     def _destination(self, step: SupplyStep) -> str | WorldPoint:
         """Node id for surface targets (graph routing), raw point for upper floors (local micro-route)."""

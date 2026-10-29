@@ -253,3 +253,48 @@ within the supply engine's 3-tile tolerance):
 * Coordinates for the 5 unverified nodes (Aggie, Wyson, redberries, Goblin crates, mill) are still
   approximate; if one of them lands on an object, the ring will now recover it automatically instead of
   halting the session.
+
+---
+
+## 12. `PR-19.4` — Underground classification & authorized exits (field incident #4)
+
+### Field progress before the halt
+| Tick | Event |
+|---|---|
+| 894 | `TAKE_GROUND_ITEM "Egg"` — **Egg (1944) collected** ✅ |
+| 1076 | `TAKE_GROUND_ITEM "Bucket"` — **Bucket (1925) collected** in the Lumbridge cellar ✅ |
+| 1094 | `UNEXPECTED_DISPLACEMENT_HALT` — climbing the kitchen staircase was misread as a death respawn ❌ |
+
+### Root cause
+`y >= 5000` conflated **genuine dungeons** (Stronghold of Security `5100..5400`) with an ordinary
+stair-connected **cellar** (Lumbridge basement `y = 9625`). Climbing out is normal play; the guard
+treated it as teleport/death.
+
+### Two layers (same philosophy as `PR-19.3`: fix the instance, then fix the class)
+
+**Layer 1 — one shared registry** (`osrs_ee/navigation/underground.py`, new):
+
+| Region | Rect | Authorized exit required? |
+|---|---|---|
+| `STRONGHOLD_OF_SECURITY` | x 2290–2410, y 5100–5400 | **Yes** (protection preserved) |
+| `LUMBRIDGE_CASTLE_BASEMENT` | x 3195–3240, y 9595–9650 | **No** (shallow cellar, own staircase) |
+| `UNCLASSIFIED_UNDERGROUND` (fallback) | any other `y >= 5000` | **Yes** — fail-closed for unknown caves |
+
+The watchdog and the supply engine import the *same* table, so they can never drift apart — the
+coordinate list is not duplicated.
+
+**Layer 2 — exits are authorized by intent**: `UNDERGROUND_EXITS` maps a region to its stair route, and
+`EXIT_UNDERGROUND` steps (plus an implicit guard at the top of `_procure`) emit
+`AUTHORIZE_SURFACE_EXIT` — the established Stronghold pattern — before anything else. The engine
+refuses to walk from a cave to a surface tile without an exit (`SUPPLY_EXIT_REQUIRED`), so a 40-minute
+cross-map `/walk` can never happen.
+
+### New verification (`99 passed`)
+
+| Test | Proves |
+|---|---|
+| `T87` | the exact tick-1094 transition (cellar → kitchen) is **NOMINAL** |
+| `T88` | the Stronghold death-respawn guard **still fires**, and explicit authorization clears it |
+| `T89` | unknown caves stay **fail-closed**; a 260-tile in-dungeon jump still halts |
+| `T90` | the engine emits `AUTHORIZE_SURFACE_EXIT` from the cellar, walks normally on the surface, and escalates `SUPPLY_EXIT_REQUIRED` only for **unregistered** regions |
+| `T91` | full kernel replay: egg → bucket → cellar exit → milk, zero escalation, ends above ground |

@@ -43,6 +43,17 @@ VERIFIED_EDIBLE_FOOD_NAMES: frozenset[str] = frozenset(
 )
 
 
+# `PR-19.4`: the classification table lives in `osrs_ee.navigation.underground` (pure geography) so the
+# watchdog and the supply engine cannot drift apart. Re-exported here for callers that already import
+# the safety layer.
+from osrs_ee.navigation.underground import (  # noqa: E402
+    UNDERGROUND_REGIONS,
+    UNDERGROUND_Y_THRESHOLD,
+    UndergroundRegion,
+    classify_underground,
+)
+
+
 class SafetyVerdict(StrEnum):
     NOMINAL = "NOMINAL"
     PIPELINED_EAT_AND_MOVE = "PIPELINED_EAT_AND_MOVE"
@@ -117,7 +128,9 @@ class ReactiveSafetyWatchdog:
 
         # 2. Spatial displacement / unexpected Lumbridge respawn guard
         x, y, plane = position
-        if self.was_underground and y < 5000 and not self.surface_exit_authorized:
+        region = classify_underground(x, y)
+        underground = region is not None
+        if self.was_underground and not underground and not self.surface_exit_authorized:
             return SafetyDecision(
                 verdict=SafetyVerdict.UNEXPECTED_DISPLACEMENT_HALT,
                 in_danger=True,
@@ -127,7 +140,7 @@ class ReactiveSafetyWatchdog:
             )
         if self.last_position is not None and not self.surface_exit_authorized:
             ox, oy, _ = self.last_position
-            if y >= 5000 and oy >= 5000 and max(abs(x - ox), abs(y - oy)) > 256:
+            if underground and classify_underground(ox, oy) is not None and max(abs(x - ox), abs(y - oy)) > 256:
                 return SafetyDecision(
                     verdict=SafetyVerdict.UNEXPECTED_DISPLACEMENT_HALT,
                     in_danger=True,
@@ -135,9 +148,14 @@ class ReactiveSafetyWatchdog:
                     halt_session=True,
                     detail=f"Unexpected large dungeon jump {self.last_position} -> {position}",
                 )
-        if y >= 5000:
-            self.was_underground = True
-            self.surface_exit_authorized = False
+        if underground:
+            assert region is not None
+            # Shallow, stair-connected basements never arm the death/teleport guard (`PR-19.4`).
+            self.was_underground = bool(region.requires_authorized_exit)
+            if self.was_underground:
+                self.surface_exit_authorized = False
+        else:
+            self.was_underground = False
         self.last_position = position
 
         total_edible_qty = sum(
