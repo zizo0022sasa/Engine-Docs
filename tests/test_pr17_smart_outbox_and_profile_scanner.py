@@ -965,5 +965,48 @@ def test_t65_floor4_room3_west_curve_x_lt_2359_no_vestibule_bounceback() -> None
         assert "Floor 4 [3/4]" in d_r3.reason
 
 
+def test_t66_floor4_door4_south_landing_5221_routes_straight_to_cradle() -> None:
+    """T66 (`PR-17.5`): Proves that north of Portal [4/4] (`5223 <= y <= 5225`) `StrongholdTaskModule`
+    passes `Portal of Death [4/4]`, and the instant the player steps south of the double-portal onto
+    live tile `(2340, 5221)` (`y <= 5221`), it NEVER bounces back into `[4/4]` and immediately emits
+    `NAVIGATE_TO` `Cradle of Life` `(2343, 5215)`.
+    """
+    from osrs_ee.bots.base import DirectiveType, TickContext
+    from osrs_ee.bots.stronghold_module import StrongholdTaskModule
+    from osrs_ee.navigation.waypoint_graph import WorldPoint
+
+    bot = StrongholdTaskModule(min_required_food=0)
+    caps = AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3)
+
+    # North of Portal [4/4] at (2340, 5223) -> passes Floor 4 [4/4]
+    ctx_north = TickContext(
+        game_tick=5,
+        position=WorldPoint(2340, 5223, 0),
+        capabilities=caps,
+        inventory_items=(),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    d_north = bot.evaluate_tick(ctx_north)
+    assert d_north.directive_type == DirectiveType.INTERACT_OBJECT
+    assert "Floor 4 [4/4]" in d_north.reason
+
+    # Exact live Port 8081 tile south of Portal [4/4] at (2340, 5221) -> walks straight to Cradle of Life (2343, 5215)!
+    ctx_south_live = TickContext(
+        game_tick=150,
+        position=WorldPoint(2340, 5221, 0),
+        capabilities=caps,
+        inventory_items=(),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    d_cradle = bot.evaluate_tick(ctx_south_live)
+    assert d_cradle.directive_type == DirectiveType.NAVIGATE_TO
+    assert isinstance(d_cradle.destination, WorldPoint)
+    assert (d_cradle.destination.x, d_cradle.destination.y) == (2343, 5215)
+    assert "Cradle of Life" in d_cradle.reason
+
+
+
 
 

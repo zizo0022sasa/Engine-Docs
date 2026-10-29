@@ -803,7 +803,7 @@ class StrongholdTaskModule(TaskModule):
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2360, 5234, 0), "Portal of Death", "Floor 4 [2/4]", max_dist=1)
             if py >= 5235 or (px < 2359 and py >= 5232) or (px < 2352 and py >= 5226):
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2341, 5226, 0), "Portal of Death", "Floor 4 [3/4]")
-            if px < 2352 and 5221 <= py <= 5225:
+            if px < 2352 and 5223 <= py <= 5225:
                 return self._walk_or_pass_door(ctx.position, WorldPoint(2341, 5222, 0), "Portal of Death", "Floor 4 [4/4]")
 
             cradle_stand = WorldPoint(2343, 5215, 0)
