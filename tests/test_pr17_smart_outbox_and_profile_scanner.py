@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -214,9 +215,9 @@ def test_t56_smart_outbox_zero_tick_spam_session_start_and_complete_loot_report(
         assert acc_after["status"] == AccountStatus.RESTING.value
         assert outbox.pending_counts_by_priority() == {"ROUTINE": 2}
 
-        # Router comes back online -> buffered outbox messages flush cleanly
+        # Router comes back online -> buffered outbox messages flush cleanly regardless of host OS uptime
         fail_network["offline"] = False
-        flushed = outbox.flush_due(_flaky_sender, now_monotonic=9999.0)
+        flushed = outbox.flush_due(_flaky_sender, now_monotonic=time.monotonic() + 100.0)
         assert flushed == 2
         assert len(delivered) == 2
         assert outbox.pending_counts_by_priority() == {}
@@ -732,3 +733,67 @@ def test_t61_attach_bot_loads_scanned_profile_capabilities_and_records_smart_out
             outbox.close()
     finally:
         mock.close()
+
+
+def test_t62_surface_20_tick_vs_underground_5_tick_stall_reroute_budget() -> None:
+    """T62 (`PR-17.1`): Proves surface graph edges `(3080, 3421) -> BARBARIAN_RIVER_FIRE (3106, 3432)`
+    allow 20 ticks (`12.0s`) for natural multi-tile WebWalker travel without premature edge blacklisting,
+    while underground dungeon steps (`y >= 5000`) preserve fast `<= 5`-tick recovery.
+    """
+    from osrs_ee.navigation import ConstrainedWaypointGraph, NavigationEngine
+    from osrs_ee.navigation.waypoint_graph import WorldPoint
+
+    graph = ConstrainedWaypointGraph()
+    nav = NavigationEngine(graph)
+    caps = AccountCapabilitiesContext("acc_02", skills={"agility": 1, "hitpoints": 10}, combat_level=3)
+
+    # 1. Surface walk from Barbarian Village (3080, 3421) -> BARBARIAN_RIVER_FIRE (3106, 3432)
+    p_village = WorldPoint(3080, 3421, 0)
+    cmd_1 = nav.step_navigation_on_tick(
+        current_pos=p_village,
+        tick_advanced=True,
+        capabilities=caps,
+        destination="BARBARIAN_RIVER_FIRE",
+    )
+    assert cmd_1 is not None and (cmd_1["x"], cmd_1["y"]) == (3106, 3432)
+
+    # Across 19 ticks (11.4s), MUST NOT blacklist the direct edge or yank the player toward (3105, 3420)!
+    for _ in range(19):
+        nxt = nav.step_navigation_on_tick(
+            current_pos=p_village,
+            tick_advanced=True,
+            capabilities=caps,
+            destination="BARBARIAN_RIVER_FIRE",
+        )
+        assert nxt is None
+    assert nav._blacklisted_edges_by_account.get("acc_02", set()) == set()
+
+    # On the 20th stalled tick (12.0s completely stationary), reroutes cleanly
+    cmd_21 = nav.step_navigation_on_tick(
+        current_pos=p_village,
+        tick_advanced=True,
+        capabilities=caps,
+        destination="BARBARIAN_RIVER_FIRE",
+    )
+    assert cmd_21 is not None
+
+    # 2. Underground dungeon (`y >= 5000`) still recovers within 3 ticks!
+    p_dungeon_start = WorldPoint(2358, 5218, 0)
+    p_dungeon_goal = WorldPoint(2343, 5218, 0)
+    d1 = nav.step_navigation_on_tick(
+        current_pos=p_dungeon_start,
+        tick_advanced=True,
+        capabilities=caps,
+        destination=p_dungeon_goal,
+    )
+    assert d1 is not None
+    assert nav.step_navigation_on_tick(current_pos=p_dungeon_start, tick_advanced=True, capabilities=caps, destination=p_dungeon_goal) is None
+    assert nav.step_navigation_on_tick(current_pos=p_dungeon_start, tick_advanced=True, capabilities=caps, destination=p_dungeon_goal) is None
+    d4 = nav.step_navigation_on_tick(
+        current_pos=p_dungeon_start,
+        tick_advanced=True,
+        capabilities=caps,
+        destination=p_dungeon_goal,
+    )
+    assert d4 is not None
+

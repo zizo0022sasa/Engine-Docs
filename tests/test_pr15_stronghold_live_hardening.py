@@ -511,13 +511,13 @@ def test_t49_null_gametick_monotonic_progression_stall_recovery_and_ankou_eat_th
         adapter.read_observation = _null_tick_read  # type: ignore[method-assign]
         adapter.execute_raw_command = _sticky_walk_exec  # type: ignore[method-assign]
 
-        # Tick 1 dispatches walk #1 (blocked); ticks 2..5 stay 100% debounced (walk_attempts == 1);
-        # tick 6 re-dispatches walk #2 cleanly without NoSafeRouteError!
-        for step in range(1, 6):
+        # Tick 1 dispatches walk #1 (blocked); ticks 2..20 stay 100% debounced across 20-tick (12s) surface budget;
+        # tick 21 re-dispatches walk #2 cleanly without NoSafeRouteError!
+        for step in range(1, 21):
             kernel.step_tick(bot, now_monotonic=float(step))
-        assert walk_attempts == 1, f"Walk re-dispatched too early during 5-tick debounce: {walk_attempts}"
-        kernel.step_tick(bot, now_monotonic=6.0)
-        assert walk_attempts == 2, f"Expected debounced walk #2 on tick 6, got {walk_attempts}"
+        assert walk_attempts == 1, f"Walk re-dispatched too early during 20-tick surface budget: {walk_attempts}"
+        kernel.step_tick(bot, now_monotonic=21.0)
+        assert walk_attempts == 2, f"Expected debounced walk #2 on tick 21, got {walk_attempts}"
         assert (adapter.position["x"], adapter.position["y"]) != (3222, 3218)
 
         # Now place player underground on Floor 4 (`y=5232 >= 5000`) at `8/10 HP` under Ankou attack!

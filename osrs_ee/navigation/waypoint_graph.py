@@ -474,7 +474,7 @@ class NavigationEngine:
         graph: ConstrainedWaypointGraph | None = None,
         *,
         lookahead_tiles: int = 4,
-        max_stalled_ticks_before_reroute: int = 5,
+        max_stalled_ticks_before_reroute: int = 20,
         walk_redispatch_cooldown_ticks: int = 5,
     ) -> None:
         self.graph = graph or ConstrainedWaypointGraph()
@@ -598,10 +598,15 @@ class NavigationEngine:
             if current_pos.y >= 5000
             else self.walk_redispatch_cooldown_ticks
         )
-        stall_gate = (
-            min(self.max_stalled_ticks_before_reroute, effective_cooldown)
-            if not prog.plan.traversed_edges
+        effective_reroute_ticks = (
+            min(5, self.max_stalled_ticks_before_reroute)
+            if current_pos.y >= 5000
             else self.max_stalled_ticks_before_reroute
+        )
+        stall_gate = (
+            min(effective_reroute_ticks, effective_cooldown)
+            if not prog.plan.traversed_edges
+            else effective_reroute_ticks
         )
 
         if prog.stalled_ticks_on_segment >= stall_gate:
