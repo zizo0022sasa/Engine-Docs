@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from osrs_ee.contracts.models import validate_observation
 
@@ -29,6 +29,8 @@ class FakeGameAdapter:
         bank_items: list[dict[str, Any]] | None = None,
         inventory_items: list[dict[str, Any]] | None = None,
         equipment_items: list[str] | None = None,
+        ground_items: list[dict[str, Any]] | None = None,
+        interaction_grants: Callable[[str, dict[str, Any], "FakeGameAdapter"], None] | None = None,
         combat_level: int | None = None,
         is_member: bool = False,
         skill_xp: dict[str, int] | None = None,
@@ -80,6 +82,15 @@ class FakeGameAdapter:
         self.bank_items: list[dict[str, Any]] = copy.deepcopy(bank_items or [])
         self.inventory_items: list[dict[str, Any]] = copy.deepcopy(inventory_items or [])
         self.equipment_items: list[str] = list(equipment_items or [])
+        # Zero-Touch world model: ground spawns available to `TAKE_GROUND_ITEM`
+        # (upstream AgentServer `POST /ground-items/pickup`).
+        # Optional test world script: called with (command_type, payload, adapter) so PR-19 zero-touch
+        # gather chains can grant/consume items exactly like the live server would.
+        self.interaction_grants: Callable[[str, dict[str, Any], "FakeGameAdapter"], None] | None = interaction_grants
+        self.ground_items: list[dict[str, Any]] = [
+            {"item_id": int(g["item_id"]), "name": str(g.get("name", "")), "quantity": int(g.get("quantity", 1))}
+            for g in (ground_items or [])
+        ]
 
         # Fault-injection toggles
         self.drop_response_after_effect_once = False
@@ -384,10 +395,42 @@ class FakeGameAdapter:
                     return {"ok": True}
             return {"ok": False, "reason": "food_not_in_inventory"}
 
-        if command_type in ("INTERACT_OBJECT", "INTERACT_NPC", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
+        if command_type in ("INTERACT_OBJECT", "INTERACT_NPC"):
+            if self.interaction_grants is not None:
+                self.interaction_grants(command_type, dict(payload), self)
             return {"ok": True}
 
+        if command_type in ("DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
+            return {"ok": True}
+
+        if command_type == "TAKE_GROUND_ITEM":
+            if self.bank_open:
+                return {"ok": False, "reason": "cannot_take_ground_item_while_bank_open"}
+            spec_name = str(payload.get("name", "")).strip().casefold()
+            spec_id = payload.get("id")
+            match = next(
+                (
+                    g for g in self.ground_items
+                    if (spec_id is not None and int(g["item_id"]) == int(spec_id))
+                    or (spec_id is None and str(g.get("name", "")).strip().casefold() == spec_name)
+                ),
+                None,
+            )
+            if match is None:
+                return {"ok": False, "reason": "ground_item_not_found"}
+            self._add_to_inventory(
+                {"item_id": int(match["item_id"]), "name": str(match.get("name", "")), "quantity": 1, "noted": False}
+            )
+            match["quantity"] = int(match.get("quantity", 1)) - 1
+            if match["quantity"] <= 0:
+                self.ground_items.remove(match)
+            if self.interaction_grants is not None:
+                self.interaction_grants(command_type, dict(payload), self)
+            return {"ok": True, "item": {"id": int(match["item_id"]), "name": match.get("name", "")}}
         if command_type == "USE_ITEM_ON_ITEM":
+            if self.interaction_grants is not None:
+                self.interaction_grants(command_type, dict(payload), self)
+                return {"ok": True}
             if self.bank_open:
                 return {"ok": False, "reason": "cannot_use_item_on_item_while_bank_open"}
             src_id = int(payload["source_item_id"])

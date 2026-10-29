@@ -1,0 +1,663 @@
+"""Zero-Touch Quest Supply Procurement Engine (`osrs_ee/bots/supply_procurement.py` — PR-19).
+
+Constitutional Mandate (`Zero-Touch Invariant`): the operator NEVER touches the mouse or the game.
+Every quest supply must be obtained by the engine itself, in priority cascade:
+
+    1. `BANK`   -> withdraw already-banked supplies (cheapest, zero risk).
+    2. `GATHER` -> walk to the verified OSRS world source and produce the item in-world
+                   (pick / search / NPC dialogue craft / item-on-item combine).
+
+> `GE_BUY` (Grand Exchange auto-buy) is deliberately **NOT** implemented in this module yet:
+> the pinned upstream `microbot-2.6.34.jar` AgentServer exposes **no** `/grand-exchange` handler
+> (verified endpoint catalog: `State, Inventory, Npc, Object, Walk, Bank, Dialogue, GroundItem,
+> Skills, Script, Login, Logout, Screenshot, Varbit, Varp, Widget*, Settings, Keyboard,
+> QuestHelper, StateMachineDebug, Profile, DynamicScriptDeploy, Observe, Path, VarChanges, Tile`),
+> so a GE purchase would require blind `Widget 465` coordinate guessing — forbidden by
+> `EXECUTION MANDATE §Zero Guessing`. It stays `PLANNED` until the Field Inspector captures the
+> read-only `GET /widgets/search?groupId=465` tree on `8081`.
+
+Design invariants:
+- Pure & stateless-by-rederivation: every tick re-derives the next step from **live inventory counts**,
+  so a crash / relog / partial progress resumes exactly where it stopped (idempotent, self-healing).
+- Every step carries cumulative `produces` tuples (`(item_id, cumulative_qty)`), which makes repeated
+  gathering (e.g. 3 Goblin mails) naturally resumable.
+- No `time.sleep`, no HTTP, no sockets — returns declarative `TaskDirective` only.
+- Stall detection per `(item, step)`: alias rotation, then precise `SUPPLY_STEP_STALLED` escalation
+  so the field operator gets an exact, actionable diagnostic line instead of a silent bank loop.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Callable, Mapping
+
+from osrs_ee.bots.base import DirectiveType, TaskDirective, TickContext
+from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
+
+# ---------------------------------------------------------------------------
+# Verified OSRS item IDs (OSRS Wiki `Item ID`) — used across the quest bundle
+# ---------------------------------------------------------------------------
+POT_ID = 1931
+BUCKET_ID = 1925
+GRAIN_ID = 1947
+SHEARS_ID = 1735
+WOOL_ID = 1737
+EGG_ID = 1944
+BUCKET_OF_MILK_ID = 1927
+POT_OF_FLOUR_ID = 1933
+BALL_OF_WOOL_ID = 1759
+CADAVA_BERRIES_ID = 753
+GOBLIN_MAIL_ID = 288
+ORANGE_GOBLIN_MAIL_ID = 286
+BLUE_GOBLIN_MAIL_ID = 287
+REDBERRY_ID = 1951
+ONION_ID = 1957
+WOAD_LEAF_ID = 1766
+RED_DYE_ID = 1763
+YELLOW_DYE_ID = 1765
+BLUE_DYE_ID = 1767
+ORANGE_DYE_ID = 1769
+
+MAX_STEP_ATTEMPTS = 26
+MAX_RECURSION_DEPTH = 3
+
+
+class SupplyStepKind(StrEnum):
+    """Action kinds. Travel is never a standalone step: every action step carries an `area`, and the
+    engine emits `NAVIGATE_TO` implicitly while the bot is still outside `walk_tolerance` of it.
+    This structurally forbids the "walk back and forth" ping-pong class of bugs."""
+    PICKUP = "PICKUP"
+    OBJECT = "OBJECT"
+    NPC = "NPC"
+    COMBINE = "COMBINE"
+
+
+@dataclass(frozen=True)
+class SupplyStep:
+    """One declarative, resumable procurement step."""
+
+    kind: SupplyStepKind
+    area: WorldPoint | None = None
+    targets: tuple[str, ...] = ()
+    action: str = ""
+    partner_id: int | None = None
+    combine_source_id: int | None = None
+    # `(item_id, cumulative_quantity)` achieved when this step has completed at least once.
+    produces: tuple[tuple[int, int], ...] = ()
+    # Items that MUST be in inventory before this step can run (recursively procured).
+    consumes: tuple[tuple[int, int], ...] = ()
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class SupplyRecipe:
+    item_id: int
+    steps: tuple[SupplyStep, ...]
+    # Ordered, Wiki-verbatim dialogue options that drive this recipe's NPC craft.
+    dialogue_options: tuple[str, ...] = ()
+    label: str = ""
+
+
+def _at(label: str, *, plane: int = 0) -> WorldPoint:
+    """Resolve a verified waypoint node id to its immutable world point."""
+    node = DEFAULT_WORLD_NODES[label]
+    assert node.plane == plane, f"{label} is plane {node.plane}, not {plane}"
+    return node
+
+
+# ---------------------------------------------------------------------------
+# Verified Zero-Touch Supply Recipes (every coordinate pinned to OSRS Wiki map data)
+# ---------------------------------------------------------------------------
+# Priority design note: `Romeo & Juliet` (5 QP) + `Goblin Diplomacy` (5 QP) == exactly 10 QP, the
+# Jagex GE trade-unlock gate, and both are single-plane surface chains with ZERO stairs.
+SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
+    # =================================================== COOK'S ASSISTANT
+    EGG_ID: SupplyRecipe(
+        item_id=EGG_ID,
+        label="Egg",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.PICKUP,
+                area=_at("LUMBRIDGE_CHICKEN_COOP"),
+                targets=("Egg",),
+                action="Take",
+                produces=((EGG_ID, 1),),
+                note="6 egg spawns inside/next to the Groats' farm chicken coop",
+            ),
+        ),
+    ),
+    POT_ID: SupplyRecipe(
+        item_id=POT_ID,
+        label="Pot",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.PICKUP,
+                area=_at("LUMBRIDGE_KITCHEN"),
+                targets=("Pot",),
+                action="Take",
+                produces=((POT_ID, 1),),
+                note="pot spawn in the Lumbridge Castle kitchen (3209,3214)",
+            ),
+        ),
+    ),
+    BUCKET_ID: SupplyRecipe(
+        item_id=BUCKET_ID,
+        label="Bucket",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.PICKUP,
+                area=_at("LUMBRIDGE_CASTLE_BASEMENT"),
+                targets=("Bucket",),
+                action="Take",
+                produces=((BUCKET_ID, 1),),
+                note="bucket spawn in the Lumbridge Castle basement (3216,9625)",
+            ),
+        ),
+    ),
+    BUCKET_OF_MILK_ID: SupplyRecipe(
+        item_id=BUCKET_OF_MILK_ID,
+        label="Bucket of milk",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("LUMBRIDGE_COW_FIELD"),
+                targets=("Dairy cow",),
+                action="Milk",
+                consumes=((BUCKET_ID, 1),),
+                produces=((BUCKET_OF_MILK_ID, 1),),
+                note="dairy cow at Lumbridge West farm (3172,3317)",
+            ),
+        ),
+    ),
+    GRAIN_ID: SupplyRecipe(
+        item_id=GRAIN_ID,
+        label="Grain",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("MILL_LANE_WHEAT_FIELD"),
+                targets=("Wheat",),
+                action="Pick",
+                produces=((GRAIN_ID, 1),),
+                note="Mill Lane wheat field (3303-3311, 3157-3171)",
+            ),
+        ),
+    ),
+    POT_OF_FLOUR_ID: SupplyRecipe(
+        item_id=POT_OF_FLOUR_ID,
+        label="Pot of flour",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("MILL_LANE_MILL"),
+                targets=("Hopper",),
+                action="Fill",
+                consumes=((GRAIN_ID, 1),),
+                note="top floor hopper: Fill, then Operate the hopper controls",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("MILL_LANE_MILL"),
+                targets=("Hopper controls", "Hopper control"),
+                action="Operate",
+                consumes=((GRAIN_ID, 1),),
+                note="operate the controls to drop the grain into the flour bin",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("MILL_LANE_MILL"),
+                targets=("Flour bin",),
+                action="Empty",
+                consumes=((POT_ID, 1),),
+                produces=((POT_OF_FLOUR_ID, 1),),
+                note="use the pot on the ground-floor flour bin",
+            ),
+        ),
+    ),
+    # =================================================== SHEEP SHEARER
+    SHEARS_ID: SupplyRecipe(
+        item_id=SHEARS_ID,
+        label="Shears",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.PICKUP,
+                area=_at("LUMBRIDGE_SHEEP_FARM"),
+                targets=("Shears",),
+                action="Take",
+                produces=((SHEARS_ID, 1),),
+                note="shears ground spawn at (3192,3272); Fred also hands them out",
+            ),
+        ),
+    ),
+    WOOL_ID: SupplyRecipe(
+        item_id=WOOL_ID,
+        label="Wool",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("LUMBRIDGE_SHEEP_FARM"),
+                targets=("Sheep",),
+                action="Shear",
+                consumes=((SHEARS_ID, 1),),
+                produces=((WOOL_ID, 20),),
+                note="shear 20x (repeat step, Ram/'The Thing' cannot be sheared)",
+            ),
+        ),
+    ),
+    BALL_OF_WOOL_ID: SupplyRecipe(
+        item_id=BALL_OF_WOOL_ID,
+        label="Ball of wool",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("LUMBRIDGE_SPINNING_WHEEL", plane=1),
+                targets=("Spinning wheel",),
+                action="Spin",
+                consumes=((WOOL_ID, 20),),
+                produces=((BALL_OF_WOOL_ID, 20),),
+                note="Lumbridge Castle 1st floor spin wheel (3209,3212, plane 1)",
+            ),
+        ),
+    ),
+    # =================================================== ROMEO & JULIET
+    CADAVA_BERRIES_ID: SupplyRecipe(
+        item_id=CADAVA_BERRIES_ID,
+        label="Cadava berries",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("VARROCK_CADAVA_BUSHES"),
+                targets=("Cadava bush", "Cadava berry bush", "Cadava bush (wild)"),
+                action="Pick",
+                produces=((CADAVA_BERRIES_ID, 1),),
+                note="cadava bushes (3264,3366)-(3277,3374), west of the East Varrock mine",
+            ),
+        ),
+    ),
+    # =================================================== GOBLIN DIPLOMACY
+    WOAD_LEAF_ID: SupplyRecipe(
+        item_id=WOAD_LEAF_ID,
+        label="Woad leaves",
+        dialogue_options=("Yes please, I need woad leaves.", "How about 20 coins?"),
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("FALADOR_PARK"),
+                targets=("Wyson the gardener", "Wyson"),
+                action="Talk-to",
+                produces=((WOAD_LEAF_ID, 2),),
+                note="Wyson sells 2 woad leaves for 20 GP",
+            ),
+        ),
+    ),
+    BLUE_DYE_ID: SupplyRecipe(
+        item_id=BLUE_DYE_ID,
+        label="Blue dye",
+        dialogue_options=(
+            "Can you make dyes for me please?",
+            "What do you need to make blue dye?",
+            "Okay, make me some blue dye please.",
+        ),
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("DRAYNOR_AGGIE"),
+                targets=("Aggie",),
+                action="Talk-to",
+                consumes=((WOAD_LEAF_ID, 2),),
+                produces=((BLUE_DYE_ID, 1),),
+                note="Aggie crafts blue dye from 2 woad leaves + 5 GP",
+            ),
+        ),
+    ),
+    REDBERRY_ID: SupplyRecipe(
+        item_id=REDBERRY_ID,
+        label="Redberries",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("VARROCK_REDBERRY_BUSHES"),
+                targets=("Redberry bush",),
+                action="Pick from",
+                produces=((REDBERRY_ID, 3),),
+                note="two wild redberry bushes south-east of Varrock, EAST of the dark wizard circle",
+            ),
+        ),
+    ),
+    ONION_ID: SupplyRecipe(
+        item_id=ONION_ID,
+        label="Onions",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("FRED_ONION_GARDEN"),
+                targets=("Onion", "Onions"),
+                action="Pick",
+                produces=((ONION_ID, 2),),
+                note="Fred's onion garden spawns (3188-3191, 3266-3268)",
+            ),
+        ),
+    ),
+    RED_DYE_ID: SupplyRecipe(
+        item_id=RED_DYE_ID,
+        label="Red dye",
+        dialogue_options=(
+            "Can you make dyes for me please?",
+            "What do you need to make red dye?",
+            "Okay, make me some red dye please.",
+        ),
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("DRAYNOR_AGGIE"),
+                targets=("Aggie",),
+                action="Talk-to",
+                consumes=((REDBERRY_ID, 3),),
+                produces=((RED_DYE_ID, 1),),
+                note="Aggie crafts red dye from 3 redberries + 5 GP",
+            ),
+        ),
+    ),
+    YELLOW_DYE_ID: SupplyRecipe(
+        item_id=YELLOW_DYE_ID,
+        label="Yellow dye",
+        dialogue_options=(
+            "Can you make dyes for me please?",
+            "What do you need to make yellow dye?",
+            "Okay, make me some yellow dye please.",
+        ),
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.NPC,
+                area=_at("DRAYNOR_AGGIE"),
+                targets=("Aggie",),
+                action="Talk-to",
+                consumes=((ONION_ID, 2),),
+                produces=((YELLOW_DYE_ID, 1),),
+                note="Aggie crafts yellow dye from 2 onions + 5 GP",
+            ),
+        ),
+    ),
+    ORANGE_DYE_ID: SupplyRecipe(
+        item_id=ORANGE_DYE_ID,
+        label="Orange dye",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.COMBINE,
+                partner_id=YELLOW_DYE_ID,
+                combine_source_id=RED_DYE_ID,
+                consumes=((RED_DYE_ID, 1), (YELLOW_DYE_ID, 1)),
+                produces=((ORANGE_DYE_ID, 1),),
+                note="combine red dye + yellow dye -> orange dye (never dye the mail with them separately)",
+            ),
+        ),
+    ),
+    BLUE_GOBLIN_MAIL_ID: SupplyRecipe(
+        item_id=BLUE_GOBLIN_MAIL_ID,
+        label="Blue goblin mail",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.COMBINE,
+                partner_id=GOBLIN_MAIL_ID,
+                combine_source_id=BLUE_DYE_ID,
+                consumes=((BLUE_DYE_ID, 1), (GOBLIN_MAIL_ID, 1)),
+                produces=((BLUE_GOBLIN_MAIL_ID, 1),),
+                note="use blue dye on goblin mail",
+            ),
+        ),
+    ),
+    ORANGE_GOBLIN_MAIL_ID: SupplyRecipe(
+        item_id=ORANGE_GOBLIN_MAIL_ID,
+        label="Orange goblin mail",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.COMBINE,
+                partner_id=GOBLIN_MAIL_ID,
+                combine_source_id=ORANGE_DYE_ID,
+                consumes=((ORANGE_DYE_ID, 1), (GOBLIN_MAIL_ID, 1)),
+                produces=((ORANGE_GOBLIN_MAIL_ID, 1),),
+                note="use orange dye on goblin mail",
+            ),
+        ),
+    ),
+    GOBLIN_MAIL_ID: SupplyRecipe(
+        item_id=GOBLIN_MAIL_ID,
+        label="Goblin mail",
+        steps=(
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("GOBLIN_VILLAGE"),
+                targets=("Crate",),
+                action="Search",
+                produces=((GOBLIN_MAIL_ID, 1),),
+                note="crate behind the generals' hut",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("GOBLIN_VILLAGE"),
+                targets=("Crate",),
+                action="Search",
+                produces=((GOBLIN_MAIL_ID, 2),),
+                note="crate inside the western hut",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("GOBLIN_VILLAGE"),
+                targets=("Crate",),
+                action="Search",
+                produces=((GOBLIN_MAIL_ID, 3),),
+                note="crate up the ladder near the village gate",
+            ),
+        ),
+    ),
+}
+
+
+def _inv_qty(items: tuple[Mapping[str, Any], ...], item_id: int) -> int:
+    return sum(
+        int(it.get("quantity", 0))
+        for it in items
+        if int(it["item_id"] if "item_id" in it else it.get("id", -1)) == item_id
+        and not bool(it.get("noted", False))
+    )
+
+
+@dataclass
+class ZeroTouchSupplyEngine:
+    """Stateless-by-rederivation procurement controller (zero `sleep`, zero HTTP)."""
+
+    recipes: Mapping[int, SupplyRecipe] = field(default_factory=lambda: SUPPLY_RECIPES)
+    walk_tolerance: int = 3
+    max_step_attempts: int = MAX_STEP_ATTEMPTS
+    # A 400-tile surface trek needs ~100 ticks; 120 strikes prove the area is genuinely unreachable
+    # (the NavigationEngine independently blacklists + reroutes jammed edges inside that budget).
+    max_walk_attempts: int = 120
+    _attempts: dict[tuple[int, int], int] = field(default_factory=dict)
+    _alias_cursor: dict[tuple[int, int], int] = field(default_factory=dict)
+    _progress: dict[tuple[int, int], int] = field(default_factory=dict)
+    _done: set[tuple[int, int]] = field(default_factory=set)
+    _walk_attempts: dict[tuple[int, int], int] = field(default_factory=dict)
+    _emitted: set[tuple[int, int]] = field(default_factory=set)
+    _active_item_id: int | None = None
+    _escalation: str = ""
+    _recurse: Callable[[TickContext, int, int, str], TaskDirective | None] | None = None
+
+    # -- public API ---------------------------------------------------------
+    @property
+    def active_item_id(self) -> int | None:
+        return self._active_item_id
+
+    @property
+    def active_dialogue_options(self) -> tuple[str, ...]:
+        if self._active_item_id is None:
+            return ()
+        recipe = self.recipes.get(self._active_item_id)
+        return recipe.dialogue_options if recipe else ()
+
+    def farmed_count(self, item_id: int) -> int:
+        return sum(
+            qty
+            for (iid, _idx), attempts in self._attempts.items()
+            if iid == item_id and attempts > 0
+        )
+
+    def ensure(
+        self,
+        ctx: TickContext,
+        item_id: int,
+        quantity: int,
+        *,
+        recurse: Callable[[TickContext, int, int, str], TaskDirective | None] | None = None,
+    ) -> TaskDirective | None:
+        """Return the single next directive needed to obtain `quantity` x `item_id`, or `None` if done.
+
+        `recurse` lets the caller inject the FULL cascade (inventory -> bank -> gather) for nested
+        ingredients, so a banked dye is withdrawn instead of being re-crafted from scratch.
+        """
+        self._recurse = recurse
+        directive = self._ensure(ctx, item_id, quantity, depth=0)
+        if directive is not None and directive.directive_type != DirectiveType.ESCALATE_HUMAN:
+            self._active_item_id = item_id
+        return directive
+
+    def escalation_reason(self) -> str:
+        return self._escalation
+
+    # -- internals ----------------------------------------------------------
+    def _ensure(self, ctx: TickContext, item_id: int, quantity: int, *, depth: int) -> TaskDirective | None:
+        if _inv_qty(ctx.inventory_items, item_id) >= quantity:
+            if depth == 0:
+                self._attempts.clear()
+            return None
+        if depth > MAX_RECURSION_DEPTH:
+            return self._escalate(f"SUPPLY_RECURSION_LIMIT:{item_id}")
+        recipe = self.recipes.get(item_id)
+        if recipe is None:
+            return None
+
+        for idx, step in enumerate(recipe.steps):
+            key = (recipe.item_id, idx)
+            if step.produces:
+                if all(_inv_qty(ctx.inventory_items, pid) >= qty for pid, qty in step.produces):
+                    continue
+            elif key in self._done:
+                continue
+            # CRITICAL ORDERING: ingredients are resolved BEFORE any bank-close guard, because a nested
+            # ingredient (e.g. Orange dye 1769) is often BANKED and must be withdrawn, which needs the
+            # bank OPEN. Closing first caused an open/close ping-pong stall in the T68 wire fixture.
+            # A repeat step CONSUMES its input while producing (e.g. 20 wool -> 20 balls of wool), so the
+            # ingredient gate is only enforced BEFORE the first unit is produced, never mid-loop.
+            already_producing = bool(step.produces) and _inv_qty(ctx.inventory_items, step.produces[0][0]) > 0
+            for needed_id, needed_qty in (() if already_producing else step.consumes):
+                if _inv_qty(ctx.inventory_items, needed_id) >= needed_qty:
+                    continue
+                if self._recurse is not None:
+                    nested = self._recurse(
+                        ctx, needed_id, needed_qty, str(self.recipes.get(needed_id).label if self.recipes.get(needed_id) else needed_id)
+                    )
+                    if nested is not None:
+                        return nested
+                    continue
+                return self._ensure(ctx, needed_id, needed_qty, depth=depth + 1)
+            # Travel is implicit: any step with an `area` first walks there (never a standalone step).
+            if step.area is not None and not self._at_area(ctx, step):
+                walks = self._walk_attempts.get(key, 0) + 1
+                self._walk_attempts[key] = walks
+                if walks > self.max_walk_attempts:
+                    return self._escalate(f"SUPPLY_AREA_UNREACHABLE:{step.area.label or step.area}")
+                dest: str | WorldPoint = (
+                    step.area.label if step.area.label in DEFAULT_WORLD_NODES else step.area
+                )
+                return TaskDirective(
+                    directive_type=DirectiveType.NAVIGATE_TO,
+                    destination=dest,
+                    reason=f"Zero-Touch supply: walking to {step.area.label or step.area} for {recipe.label}",
+                )
+            # In-world / inventory interactions cannot run while the bank interface is open
+            # (`Rs2Inventory.invokeMenu` re-targets to the bank container).
+            if ctx.bank_is_open:
+                return TaskDirective(
+                    directive_type=DirectiveType.BANK_TURNAROUND,
+                    payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                    reason=f"Zero-Touch supply: closing bank before gathering {recipe.label}",
+                )
+            directive = self._emit(ctx, recipe, idx, step)
+            # A step with no derivable postcondition (e.g. hopper `Fill`) is dispatched EXACTLY ONCE:
+            # re-firing it would empty a hopper that is already primed.
+            if not step.produces and directive.directive_type != DirectiveType.ESCALATE_HUMAN:
+                self._done.add(key)
+                self._emitted.add(key)
+            return directive
+        return self._escalate(f"SUPPLY_CHAIN_EXHAUSTED:{recipe.label}")
+
+    def _emit(self, ctx: TickContext, recipe: SupplyRecipe, idx: int, step: SupplyStep) -> TaskDirective:
+        key = (recipe.item_id, idx)
+        # Self-healing stall detector: ANY inventory progress on this step's product resets the budget,
+        # so long repeat-gather steps (20x shear, 20x spin, 3x crate) never trip the stall guard.
+        if step.produces:
+            progress_id = step.produces[0][0]
+            current = _inv_qty(ctx.inventory_items, progress_id)
+            if current > self._progress.get(key, -1):
+                self._progress[key] = current
+                self._attempts[key] = 0
+                self._alias_cursor.pop(key, None)
+        attempts = self._attempts.get(key, 0) + 1
+        self._attempts[key] = attempts
+        if attempts > self.max_step_attempts:
+            return self._escalate(
+                f"SUPPLY_STEP_STALLED:{recipe.label}:{step.kind}:{step.targets[0] if step.targets else recipe.label}"
+            )
+
+        if step.kind == SupplyStepKind.OBJECT:
+            return TaskDirective(
+                directive_type=DirectiveType.INTERACT_OBJECT,
+                payload={"name": self._pick_alias(recipe.item_id, idx, step), "action": step.action},
+                reason=f"Zero-Touch supply: {step.action} {recipe.label} source ({step.note})",
+            )
+
+        if step.kind == SupplyStepKind.NPC:
+            return TaskDirective(
+                directive_type=DirectiveType.INTERACT_NPC,
+                payload={"name": self._pick_alias(recipe.item_id, idx, step), "action": step.action},
+                reason=f"Zero-Touch supply: {step.action} for {recipe.label} ({step.note})",
+            )
+
+        if step.kind == SupplyStepKind.COMBINE:
+            assert step.partner_id is not None
+            source_id = step.combine_source_id if step.combine_source_id is not None else step.consumes[0][0]
+            return TaskDirective(
+                directive_type=DirectiveType.USE_ITEM_ON_ITEM,
+                payload={
+                    "source_item_id": source_id,
+                    "target_item_id": step.partner_id,
+                    "source_name": recipe.label,
+                },
+                reason=f"Zero-Touch supply: combining {recipe.label} ({step.note})",
+            )
+
+        return self._escalate(f"SUPPLY_UNKNOWN_STEP_KIND:{step.kind}")
+
+    def _at_area(self, ctx: TickContext, step: SupplyStep) -> bool:
+        assert step.area is not None
+        return (
+            ctx.position.plane == step.area.plane
+            and ctx.position.chebyshev_distance(step.area) <= self.walk_tolerance
+        )
+
+    def _pick_alias(self, item_id: int, idx: int, step: SupplyStep) -> str:
+        """Rotate through Wiki-verified display-name aliases when a step stalls on name drift."""
+        if not step.targets:
+            return ""
+        key = (item_id, idx)
+        attempts = self._attempts.get(key, 0)
+        cursor = self._alias_cursor.get(key, 0)
+        # Rotate one alias every 6 attempts so a single wrong spelling cannot burn the whole budget.
+        if attempts and attempts % 6 == 0 and len(step.targets) > 1:
+            cursor = (cursor + 1) % len(step.targets)
+            self._alias_cursor[key] = cursor
+        return step.targets[cursor % len(step.targets)]
+
+    def _escalate(self, reason: str) -> TaskDirective:
+        self._escalation = reason
+        return TaskDirective(directive_type=DirectiveType.ESCALATE_HUMAN, reason=reason)

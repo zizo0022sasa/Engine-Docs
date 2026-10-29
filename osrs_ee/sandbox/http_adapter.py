@@ -650,6 +650,20 @@ class MicrobotHttpAdapter:
             if not (("groupId" in req_body and "childId" in req_body) or "text" in req_body):
                 raise ValueError("WIDGET_CLICK requires ('groupId' and 'childId') or 'text'")
             return _normalize_command_response(self._request_json("POST", "/widgets/click", req_body))
+        if command_type == "TAKE_GROUND_ITEM":
+            # Upstream Microbot `GroundItemHandler`: POST /ground-items/pickup {name|id} resolves the
+            # NEAREST matching ground item and loots it with ZERO operator input (no walking required
+            # beyond the player's current scene, so this is the safest zero-touch pickup primitive).
+            body: dict[str, Any] = {}
+            if payload.get("id") is not None:
+                body["id"] = int(payload["id"])
+            if payload.get("name"):
+                body["name"] = str(payload["name"])
+            if not body:
+                return {"ok": False, "reason": "ground_item_needs_name_or_id"}
+            return _normalize_command_response(
+                self._request_json("POST", "/ground-items/pickup", body)
+            )
         if command_type == "INTERACT_OBJECT":
             obj_body: dict[str, Any] = {
                 k: v for k, v in payload.items() if k not in ("target_x", "target_y")

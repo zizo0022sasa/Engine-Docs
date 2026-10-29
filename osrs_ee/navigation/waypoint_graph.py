@@ -105,6 +105,20 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "LUMBRIDGE_SWAMP_FISHING": WorldPoint(3243, 3152, 0, "LUMBRIDGE_SWAMP_FISHING"),
     "BARBARIAN_RIVER_FIRE": WorldPoint(3078, 3445, 0, "BARBARIAN_RIVER_FIRE"),
     "GOBLIN_VILLAGE": WorldPoint(2958, 3512, 0, "GOBLIN_VILLAGE"),
+    # --- PR-19 ZERO-TOUCH SUPPLY SOURCES (coordinates from OSRS Wiki map data pins) ---
+    "FRED_ONION_GARDEN": WorldPoint(3189, 3267, 0, "FRED_ONION_GARDEN"),      # onion spawns 3188-3191/3266-3268
+    "LUMBRIDGE_COW_FIELD": WorldPoint(3172, 3317, 0, "LUMBRIDGE_COW_FIELD"),  # dairy cow x:3172 y:3317
+    "LUMBRIDGE_CHICKEN_COOP": WorldPoint(3175, 3303, 0, "LUMBRIDGE_CHICKEN_COOP"),  # egg spawns 3169..3185
+    "LUMBRIDGE_CASTLE_NORTH_STAIRS": WorldPoint(3205, 3227, 0, "LUMBRIDGE_CASTLE_NORTH_STAIRS"),
+    "LUMBRIDGE_SPINNING_WHEEL": WorldPoint(3209, 3212, 1, "LUMBRIDGE_SPINNING_WHEEL"),  # plane 1
+    "BARBARIAN_SPINNING_WHEEL": WorldPoint(3081, 3430, 0, "BARBARIAN_SPINNING_WHEEL"),  # plane-0 fallback
+    "LUMBRIDGE_CASTLE_BASEMENT": WorldPoint(3216, 9625, 0, "LUMBRIDGE_CASTLE_BASEMENT"),  # bucket spawn
+    "MILL_LANE_WHEAT_FIELD": WorldPoint(3307, 3163, 0, "MILL_LANE_WHEAT_FIELD"),  # wheat pins 3303-3311
+    "MILL_LANE_MILL": WorldPoint(3307, 3174, 0, "MILL_LANE_MILL"),
+    "DRAYNOR_AGGIE": WorldPoint(3087, 3232, 0, "DRAYNOR_AGGIE"),
+    "FALADOR_PARK": WorldPoint(3000, 3375, 0, "FALADOR_PARK"),
+    "VARROCK_CADAVA_BUSHES": WorldPoint(3268, 3368, 0, "VARROCK_CADAVA_BUSHES"),  # pins 3264..3277
+    "VARROCK_REDBERRY_BUSHES": WorldPoint(3240, 3358, 0, "VARROCK_REDBERRY_BUSHES"),
 }
 
 
@@ -312,6 +326,87 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "src": "FALADOR_EAST_ROAD",
             "dst": "GOBLIN_VILLAGE",
             "cost_tiles": 158.0,
+        },
+        # ==================================================================
+        # PR-19 ZERO-TOUCH SUPPLY SPURS (Dijkstra-safe, level-3 friendly)
+        # ==================================================================
+        {
+            "edge_id": "supply_sheep_farm_to_fred_onions",
+            "src": "LUMBRIDGE_SHEEP_FARM",
+            "dst": "FRED_ONION_GARDEN",
+            "cost_tiles": 8.0,
+        },
+        {
+            "edge_id": "supply_sheep_farm_to_cow_field",
+            "src": "LUMBRIDGE_SHEEP_FARM",
+            "dst": "LUMBRIDGE_COW_FIELD",
+            "cost_tiles": 46.0,
+        },
+        {
+            "edge_id": "supply_cow_field_to_chicken_coop",
+            "src": "LUMBRIDGE_COW_FIELD",
+            "dst": "LUMBRIDGE_CHICKEN_COOP",
+            "cost_tiles": 15.0,
+        },
+        {
+            "edge_id": "supply_courtyard_to_castle_north_stairs",
+            "src": "LUMBRIDGE_CASTLE_COURTYARD",
+            "dst": "LUMBRIDGE_CASTLE_NORTH_STAIRS",
+            "cost_tiles": 14.0,
+        },
+        {
+            "edge_id": "supply_north_stairs_to_spinning_wheel",
+            "src": "LUMBRIDGE_CASTLE_NORTH_STAIRS",
+            "dst": "LUMBRIDGE_SPINNING_WHEEL",
+            "cost_tiles": 22.0,
+        },
+        {
+            "edge_id": "supply_kitchen_to_castle_basement",
+            "src": "LUMBRIDGE_KITCHEN",
+            "dst": "LUMBRIDGE_CASTLE_BASEMENT",
+            "cost_tiles": 18.0,
+        },
+        {
+            "edge_id": "supply_barbarian_to_spinning_wheel",
+            "src": "BARBARIAN_VILLAGE",
+            "dst": "BARBARIAN_SPINNING_WHEEL",
+            "cost_tiles": 12.0,
+        },
+        {
+            "edge_id": "supply_cow_field_to_wheat_field",
+            "src": "LUMBRIDGE_COW_FIELD",
+            "dst": "MILL_LANE_WHEAT_FIELD",
+            "cost_tiles": 205.0,
+        },
+        {
+            "edge_id": "supply_wheat_field_to_mill",
+            "src": "MILL_LANE_WHEAT_FIELD",
+            "dst": "MILL_LANE_MILL",
+            "cost_tiles": 12.0,
+        },
+        {
+            "edge_id": "supply_draynor_bank_to_aggie",
+            "src": "DRAYNOR_BANK",
+            "dst": "DRAYNOR_AGGIE",
+            "cost_tiles": 16.0,
+        },
+        {
+            "edge_id": "supply_falador_east_to_park",
+            "src": "FALADOR_EAST_ROAD",
+            "dst": "FALADOR_PARK",
+            "cost_tiles": 32.0,
+        },
+        {
+            "edge_id": "supply_east_church_to_cadava_bushes",
+            "src": "VARROCK_EAST_CHURCH",
+            "dst": "VARROCK_CADAVA_BUSHES",
+            "cost_tiles": 126.0,
+        },
+        {
+            "edge_id": "supply_cadava_to_redberry_bushes",
+            "src": "VARROCK_CADAVA_BUSHES",
+            "dst": "VARROCK_REDBERRY_BUSHES",
+            "cost_tiles": 30.0,
         },
     ]
 

@@ -29,6 +29,7 @@ ALLOWED_MVP_COMMANDS: frozenset[str] = frozenset(
         "INTERACT_OBJECT",
         "INTERACT_NPC",
         "USE_ITEM_ON_ITEM",
+        "TAKE_GROUND_ITEM",
         "WIDGET_CLICK",
         "DIALOGUE_SELECT",
         "DIALOGUE_CONTINUE",

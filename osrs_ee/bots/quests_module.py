@@ -25,18 +25,27 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TaskModule, TickContext
+from osrs_ee.bots.supply_procurement import (
+    BALL_OF_WOOL_ID,
+    BLUE_DYE_ID,
+    BLUE_GOBLIN_MAIL_ID,
+    BUCKET_OF_MILK_ID,
+    CADAVA_BERRIES_ID,
+    EGG_ID,
+    GOBLIN_MAIL_ID,
+    ORANGE_DYE_ID,
+    ORANGE_GOBLIN_MAIL_ID,
+    POT_OF_FLOUR_ID,
+    RED_DYE_ID,
+    YELLOW_DYE_ID,
+    ZeroTouchSupplyEngine,
+)
 from osrs_ee.navigation.waypoint_graph import WorldPoint
 
 VARP_COOKS_ASSISTANT = 29
 VARP_SHEEP_SHEARER = 179
 VARP_ROMEO_AND_JULIET = 144
 VARP_GOBLIN_DIPLOMACY = 62
-
-ORANGE_GOBLIN_MAIL_ID = 286
-BLUE_GOBLIN_MAIL_ID = 287
-GOBLIN_MAIL_ID = 288
-BLUE_DYE_ID = 1767
-ORANGE_DYE_ID = 1769
 
 # Exact verified dialogue option texts across all 4 quests (priority-ordered against OSRS Wiki Transcripts)
 VERIFIED_QUEST_DIALOGUE_OPTIONS: tuple[str, ...] = (
@@ -86,7 +95,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
     def __init__(self, *, target_quest_points: int = 10, anchor_bank_node: str = "GRAND_EXCHANGE") -> None:
         self.target_quest_points = max(1, int(target_quest_points))
         self.anchor_bank_node = anchor_bank_node
-        self._last_combine_tick: int = -100
+        self.supply = ZeroTouchSupplyEngine()
+        self._bank_audit_done = False
+        self._bank_stock: dict[int, int] = {}
 
     @property
     def module_id(self) -> str:
@@ -98,6 +109,16 @@ class TradeUnlockQuestsTaskModule(TaskModule):
 
     def _handle_quest_dialogue(self, ctx: TickContext) -> TaskDirective:
         if ctx.dialogue_options:
+            # Zero-Touch supply dialogues (Wyson / Aggie) take priority while a supply chain is active,
+            # and are resolved strictly against Wiki-verbatim option texts for the ACTIVE item only.
+            for expected in self.supply.active_dialogue_options:
+                for opt in ctx.dialogue_options:
+                    if opt.strip().casefold().rstrip(".!?") == expected.casefold().rstrip(".!?"):
+                        return TaskDirective(
+                            directive_type=DirectiveType.SELECT_DIALOGUE,
+                            payload={"option": opt},
+                            reason=f"Zero-Touch supply dialogue: selected '{opt}'",
+                        )
             for expected in VERIFIED_QUEST_DIALOGUE_OPTIONS:
                 for opt in ctx.dialogue_options:
                     if opt.strip().casefold().rstrip(".!?") == expected.casefold().rstrip(".!?"):
@@ -115,148 +136,112 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             reason="Advancing quest dialogue / cutscene",
         )
 
+    # ------------------------------------------------------------------
+    # Zero-Touch Supply Procurement (PR-19 `Zero-Touch Invariant`)
+    # ------------------------------------------------------------------
+    def _goto_anchor_bank(self, ctx: TickContext, reason: str) -> TaskDirective:
+        if ctx.position.plane != 0:
+            return self._descend_juliet_stairs(ctx.position)
+        anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
+        if ctx.position.chebyshev_distance(anchor_wp) > 4:
+            return TaskDirective(
+                directive_type=DirectiveType.NAVIGATE_TO,
+                destination=self.anchor_bank_node,
+                reason=reason,
+            )
+        return TaskDirective(
+            directive_type=DirectiveType.BANK_TURNAROUND,
+            payload={"open_only": True, "deposit_inventory": False},
+            reason=reason,
+        )
+
+    def _audit_bank_once(self, ctx: TickContext) -> TaskDirective | None:
+        """Single one-shot live bank audit at the GE anchor (never re-walks to the GE again)."""
+        if self._bank_audit_done:
+            return None
+        if ctx.position.plane != 0 or ctx.position.chebyshev_distance(WorldPoint(3164, 3487, 0)) > 4 or not ctx.bank_is_open:
+            return self._goto_anchor_bank(ctx, "Zero-Touch supply: auditing GE bank stock once")
+        audited_ids = set(self.supply.recipes.keys()) | {
+            EGG_ID, BUCKET_OF_MILK_ID, POT_OF_FLOUR_ID, BALL_OF_WOOL_ID, CADAVA_BERRIES_ID,
+            RED_DYE_ID, YELLOW_DYE_ID, BLUE_DYE_ID, ORANGE_DYE_ID, GOBLIN_MAIL_ID,
+            ORANGE_GOBLIN_MAIL_ID, BLUE_GOBLIN_MAIL_ID,
+        }
+        self._bank_stock = {
+            iid: _inv_count(ctx.bank_items, item_id=iid, noted=False) for iid in audited_ids
+        }
+        self._bank_audit_done = True
+        return TaskDirective(
+            directive_type=DirectiveType.WAIT_NEXT_TICK,
+            reason=f"Zero-Touch supply: bank audited ({sum(1 for v in self._bank_stock.values() if v)} usable stacks)",
+        )
+
+    def _procure(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
+        """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""
+        if _inv_count(ctx.inventory_items, item_id=item_id, noted=False) >= quantity:
+            return None
+        audit = self._audit_bank_once(ctx)
+        if audit is not None:
+            return audit
+        if self._bank_stock.get(item_id, 0) >= quantity:
+            if not ctx.bank_is_open:
+                return self._goto_anchor_bank(ctx, f"Zero-Touch supply: returning to bank for {label}")
+            return TaskDirective(
+                directive_type=DirectiveType.BANK_TURNAROUND,
+                payload={
+                    "deposit_inventory": False,
+                    "withdraw": [{"item_id": item_id, "quantity": quantity}],
+                    "close_when_done": True,
+                },
+                reason=f"Zero-Touch supply: withdrawing {quantity}x {label} from bank",
+            )
+        directive = self.supply.ensure(ctx, item_id, quantity, recurse=self._procure_nested)
+        if directive is not None:
+            return directive
+        return TaskDirective(
+            directive_type=DirectiveType.ESCALATE_HUMAN,
+            reason=f"SUPPLY_UNSOURCED:{label}",
+        )
+
+    def _procure_nested(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
+        """Bank-aware recursion hook injected into the supply engine (ingredients too!)."""
+        return self._procure(ctx, item_id, quantity, label)
+
     def _ensure_supplies_at_anchor(
         self,
         ctx: TickContext,
         required_items: list[dict[str, Any]],
         quest_label: str,
     ) -> TaskDirective | None:
-        missing = any(
-            _inv_count(ctx.inventory_items, item_id=int(req["item_id"]), noted=False) < int(req["quantity"])
-            for req in required_items
-        )
-        if not missing and not ctx.bank_is_open:
-            return None
-
-        # Must return to ground plane before overworld navigation if upstairs at Juliet's
-        if ctx.position.plane != 0:
-            return self._descend_juliet_stairs(ctx.position)
-
-        anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
-        if ctx.position.chebyshev_distance(anchor_wp) > 4:
-            return TaskDirective(
-                directive_type=DirectiveType.NAVIGATE_TO,
-                destination=self.anchor_bank_node,
-                reason=f"{quest_label}: routing to {self.anchor_bank_node} for quest supplies",
+        """Backwards-compatible declarative wrapper over `_procure` for every required item."""
+        for req in required_items:
+            directive = self._procure(
+                ctx,
+                int(req["item_id"]),
+                int(req.get("quantity", 1)),
+                str(req.get("name") or req["item_id"]),
             )
-        return TaskDirective(
-            directive_type=DirectiveType.BANK_TURNAROUND,
-            payload={
-                "deposit_inventory": True,
-                "withdraw": required_items,
-                "close_when_done": True,
-            },
-            reason=f"{quest_label} (QP={ctx.quest_points}): preparing unnoted supplies at bank",
-        )
+            if directive is not None:
+                return directive
+        return None
 
     def _prepare_goblin_diplomacy_supplies(self, ctx: TickContext) -> TaskDirective | None:
-        """Stage Goblin Diplomacy armours (`286`, `287`, `288`), crafting untradeable dyed mails in inventory."""
-        orange_mail = _inv_count(ctx.inventory_items, item_id=ORANGE_GOBLIN_MAIL_ID, noted=False)
-        blue_mail = _inv_count(ctx.inventory_items, item_id=BLUE_GOBLIN_MAIL_ID, noted=False)
-        brown_mail = _inv_count(ctx.inventory_items, item_id=GOBLIN_MAIL_ID, noted=False)
-        orange_dye = _inv_count(ctx.inventory_items, item_id=ORANGE_DYE_ID, noted=False)
-        blue_dye = _inv_count(ctx.inventory_items, item_id=BLUE_DYE_ID, noted=False)
-
-        if orange_mail >= 1 and blue_mail >= 1 and brown_mail >= 1:
-            if ctx.bank_is_open:
-                return TaskDirective(
-                    directive_type=DirectiveType.BANK_TURNAROUND,
-                    payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
-                    reason=f"Goblin Diplomacy (QP={ctx.quest_points}): all 3 goblin mails ready; closing bank",
-                )
-            return None
-
-        need_orange_craft = 1 if orange_mail < 1 else 0
-        need_blue_craft = 1 if blue_mail < 1 else 0
-        required_brown_in_inv = 1 + need_orange_craft + need_blue_craft
-        can_craft_in_inventory = (
-            orange_dye >= need_orange_craft
-            and blue_dye >= need_blue_craft
-            and brown_mail >= required_brown_in_inv
-        )
-
-        if can_craft_in_inventory:
-            # Upstream Rs2Inventory.java requires bank interface closed before clicking "Use" on inventory items!
-            if ctx.bank_is_open:
-                return TaskDirective(
-                    directive_type=DirectiveType.BANK_TURNAROUND,
-                    payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
-                    reason=f"Goblin Diplomacy (QP={ctx.quest_points}): closing bank before dyeing Goblin mail",
-                )
-            if (ctx.game_tick - self._last_combine_tick) < 2:
-                return TaskDirective(
-                    directive_type=DirectiveType.WAIT_NEXT_TICK,
-                    reason=f"Goblin Diplomacy (QP={ctx.quest_points}): waiting 1 tick for dye combine",
-                )
-            self._last_combine_tick = ctx.game_tick
-            if need_orange_craft == 1:
-                return TaskDirective(
-                    directive_type=DirectiveType.USE_ITEM_ON_ITEM,
-                    payload={
-                        "source_item_id": ORANGE_DYE_ID,
-                        "target_item_id": GOBLIN_MAIL_ID,
-                        "source_name": "Orange dye",
-                        "target_name": "Goblin mail",
-                    },
-                    reason=f"Goblin Diplomacy (QP={ctx.quest_points}): dyeing Goblin mail with Orange dye (1769 -> 288)",
-                )
-            return TaskDirective(
-                directive_type=DirectiveType.USE_ITEM_ON_ITEM,
-                payload={
-                    "source_item_id": BLUE_DYE_ID,
-                    "target_item_id": GOBLIN_MAIL_ID,
-                    "source_name": "Blue dye",
-                    "target_name": "Goblin mail",
-                },
-                reason=f"Goblin Diplomacy (QP={ctx.quest_points}): dyeing Goblin mail with Blue dye (1767 -> 288)",
-            )
-
-        if ctx.position.plane != 0:
-            return self._descend_juliet_stairs(ctx.position)
-
-        anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
-        if ctx.position.chebyshev_distance(anchor_wp) > 4:
-            return TaskDirective(
-                directive_type=DirectiveType.NAVIGATE_TO,
-                destination=self.anchor_bank_node,
-                reason=f"Goblin Diplomacy (QP={ctx.quest_points}): routing to {self.anchor_bank_node} for dyes & Goblin mail",
-            )
-
-        if not ctx.bank_is_open:
+        """Zero-Touch Goblin Diplomacy staging: 1 blue mail + 1 orange mail + 1 plain brown mail."""
+        # Verified wire order (T68): Orange dye on Goblin mail FIRST, then Blue dye -> [1769, 288, 1767, 288].
+        for item_id, label in (
+            (ORANGE_GOBLIN_MAIL_ID, "Orange goblin mail"),
+            (BLUE_GOBLIN_MAIL_ID, "Blue goblin mail"),
+            (GOBLIN_MAIL_ID, "Goblin mail"),
+        ):
+            directive = self._procure(ctx, item_id, 1, label)
+            if directive is not None:
+                return directive
+        if ctx.bank_is_open:
             return TaskDirective(
                 directive_type=DirectiveType.BANK_TURNAROUND,
-                payload={"open_only": True},
-                reason=f"Goblin Diplomacy (QP={ctx.quest_points}): opening bank to inspect dyes & Goblin mail",
+                payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
+                reason="Goblin Diplomacy: all 3 goblin mails ready; closing bank",
             )
-
-        bank_has_orange_mail = _inv_count(ctx.bank_items, item_id=ORANGE_GOBLIN_MAIL_ID, noted=False) >= 1
-        bank_has_blue_mail = _inv_count(ctx.bank_items, item_id=BLUE_GOBLIN_MAIL_ID, noted=False) >= 1
-
-        withdraw_list: list[dict[str, Any]] = []
-        brown_needed_total = 1
-        if orange_mail >= 1 or bank_has_orange_mail:
-            withdraw_list.append({"item_id": ORANGE_GOBLIN_MAIL_ID, "name": "Orange goblin mail", "quantity": 1})
-        else:
-            withdraw_list.append({"item_id": ORANGE_DYE_ID, "name": "Orange dye", "quantity": 1})
-            brown_needed_total += 1
-
-        if blue_mail >= 1 or bank_has_blue_mail:
-            withdraw_list.append({"item_id": BLUE_GOBLIN_MAIL_ID, "name": "Blue goblin mail", "quantity": 1})
-        else:
-            withdraw_list.append({"item_id": BLUE_DYE_ID, "name": "Blue dye", "quantity": 1})
-            brown_needed_total += 1
-
-        withdraw_list.append({"item_id": GOBLIN_MAIL_ID, "name": "Goblin mail", "quantity": brown_needed_total})
-
-        return TaskDirective(
-            directive_type=DirectiveType.BANK_TURNAROUND,
-            payload={
-                "deposit_inventory": True,
-                "withdraw": withdraw_list,
-                "close_when_done": True,
-            },
-            reason=f"Goblin Diplomacy (QP={ctx.quest_points}): withdrawing dyes & {brown_needed_total}x Goblin mail",
-        )
+        return None
 
     @staticmethod
     def _ascend_juliet_stairs(pos: WorldPoint) -> TaskDirective:

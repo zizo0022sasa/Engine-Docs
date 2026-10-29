@@ -467,6 +467,17 @@ class ExecutionEngineKernel:
             )
             dispatched.append("USE_ITEM_ON_ITEM")
 
+        elif directive.directive_type == DirectiveType.TAKE_GROUND_ITEM:
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent(
+                    "TAKE_GROUND_ITEM",
+                    dict(directive.payload),
+                    idempotency_class="NON_IDEMPOTENT",
+                ),
+                postcondition_checker=lambda _post: True,
+            )
+            dispatched.append("TAKE_GROUND_ITEM")
+
         elif directive.directive_type == DirectiveType.CLICK_WIDGET:
             self.gate.dispatch_verified_command(
                 intent=self._make_intent("WIDGET_CLICK", dict(directive.payload)),
