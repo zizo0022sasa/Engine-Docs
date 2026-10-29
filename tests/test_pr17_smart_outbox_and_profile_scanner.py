@@ -919,4 +919,51 @@ def test_t64_floor4_vestibule_2_of_4_max_dist_1_anti_oscillation() -> None:
     }
 
 
+def test_t65_floor4_room3_west_curve_x_lt_2359_no_vestibule_bounceback() -> None:
+    """T65 (`PR-17.4`): Proves that once the player crosses Portal [2/4] into Room 3 and curves
+    west/south across `2352 <= x <= 2358` with `5232 <= y <= 5234` toward Portal [3/4] `(2341, 5226)`,
+    `StrongholdTaskModule` NEVER misclassifies the player into Vestibule [2/4] (`px >= 2359`) and
+    NEVER falls through prematurely to `Cradle of Life` `(2343, 5215)` — every tile stays locked on
+    `Floor 4 [3/4]` `(2341, 5226)`, while `(2359, 5234)` inside the vestibule still passes `[2/4]`.
+    """
+    from osrs_ee.bots.base import DirectiveType, TickContext
+    from osrs_ee.bots.stronghold_module import StrongholdTaskModule
+    from osrs_ee.navigation.waypoint_graph import WorldPoint
+
+    bot = StrongholdTaskModule(min_required_food=1)
+    caps = AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3)
+
+    # Current live standing tile (2359, 5234) inside vestibule -> passes Portal [2/4] immediately
+    ctx_in_vestibule = TickContext(
+        game_tick=120,
+        position=WorldPoint(2359, 5234, 0),
+        capabilities=caps,
+        inventory_items=({"id": 2142, "name": "Cooked meat", "quantity": 1},),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    d_vest = bot.evaluate_tick(ctx_in_vestibule)
+    assert d_vest.directive_type == DirectiveType.INTERACT_OBJECT
+    assert "Floor 4 [2/4]" in d_vest.reason
+
+    # Curving west & south inside Room 3 across x in 2352..2358, y in 5232..5234 -> MUST target [3/4] (2341, 5226)!
+    for rx, ry in ((2358, 5234), (2356, 5233), (2352, 5232), (2348, 5229)):
+        ctx_r3 = TickContext(
+            game_tick=125,
+            position=WorldPoint(rx, ry, 0),
+            capabilities=caps,
+            inventory_items=({"id": 2142, "name": "Cooked meat", "quantity": 1},),
+            varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+            total_level=35,
+        )
+        d_r3 = bot.evaluate_tick(ctx_r3)
+        assert d_r3.directive_type == DirectiveType.NAVIGATE_TO, f"Unexpected directive at ({rx},{ry}): {d_r3}"
+        assert isinstance(d_r3.destination, WorldPoint)
+        assert (d_r3.destination.x, d_r3.destination.y) == (2341, 5226), (
+            f"Room 3 tile ({rx},{ry}) bounced to {d_r3.destination} instead of Portal [3/4] (2341, 5226)!"
+        )
+        assert "Floor 4 [3/4]" in d_r3.reason
+
+
+
 
