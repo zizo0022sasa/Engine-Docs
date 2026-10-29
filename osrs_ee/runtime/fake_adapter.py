@@ -387,6 +387,46 @@ class FakeGameAdapter:
         if command_type in ("INTERACT_OBJECT", "INTERACT_NPC", "DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):
             return {"ok": True}
 
+        if command_type == "USE_ITEM_ON_ITEM":
+            if self.bank_open:
+                return {"ok": False, "reason": "cannot_use_item_on_item_while_bank_open"}
+            src_id = int(payload["source_item_id"])
+            dst_id = int(payload["target_item_id"])
+            pair = frozenset({src_id, dst_id})
+            combine_recipes: dict[frozenset[int], tuple[int, str]] = {
+                frozenset({1769, 288}): (286, "Orange goblin mail"),
+                frozenset({1767, 288}): (287, "Blue goblin mail"),
+            }
+            src_entry = next(
+                (it for it in self.inventory_items if int(it["item_id"]) == src_id and not bool(it.get("noted")) and int(it["quantity"]) > 0),
+                None,
+            )
+            dst_entry = next(
+                (
+                    it
+                    for it in self.inventory_items
+                    if int(it["item_id"]) == dst_id
+                    and not bool(it.get("noted"))
+                    and int(it["quantity"]) > (1 if src_id == dst_id else 0)
+                ),
+                None,
+            )
+            if src_entry is None or dst_entry is None:
+                return {"ok": False, "reason": "combine_items_missing_in_inventory"}
+            if pair in combine_recipes:
+                out_id, out_name = combine_recipes[pair]
+                src_entry["quantity"] -= 1
+                if src_entry["quantity"] <= 0:
+                    self.inventory_items.remove(src_entry)
+                dst_entry_after = next(
+                    it for it in self.inventory_items if int(it["item_id"]) == dst_id and not bool(it.get("noted")) and int(it["quantity"]) > 0
+                )
+                dst_entry_after["quantity"] -= 1
+                if dst_entry_after["quantity"] <= 0:
+                    self.inventory_items.remove(dst_entry_after)
+                self._add_to_inventory({"item_id": out_id, "name": out_name, "quantity": 1, "noted": False})
+            return {"ok": True}
+
         if command_type == "WIDGET_CLICK":
             has_coords = "groupId" in payload and "childId" in payload
             has_text = bool(payload.get("text"))

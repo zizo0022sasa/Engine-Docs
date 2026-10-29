@@ -80,6 +80,7 @@ class ExecutionEngineKernel:
         self._session_run_bootstrapped: bool = False
         self._active_task_id: str = ""
         self._last_known_bank_items: tuple[dict[str, Any], ...] = ()
+        self._last_persisted_qp: int | None = None
 
     def emit_session_started(self, *, task_id: str) -> None:
         """Emit single deduplicated `🚀 بدء جلسة حساب` notification via `BoundedOutbox`."""
@@ -377,6 +378,23 @@ class ExecutionEngineKernel:
         if bank_is_open and isinstance(bank_obs.get("items"), list):
             self._last_known_bank_items = tuple(dict(it) for it in bank_obs["items"] if isinstance(it, dict))
 
+        qp_obs = obs.get("quest_points") or {}
+        if qp_obs.get("quality") == "KNOWN" and isinstance(qp_obs.get("value"), int):
+            live_qp_val = int(qp_obs["value"])
+            if live_qp_val != self.capabilities.quest_points:
+                from dataclasses import replace as _dc_replace
+
+                self.capabilities = _dc_replace(self.capabilities, quest_points=live_qp_val)
+            if live_qp_val != self._last_persisted_qp:
+                try:
+                    self.gate.store.apply_observation_snapshot(
+                        event_id=f"qp_sync_{self.session_id}_{obs['observation_id']}",
+                        observation=obs,
+                    )
+                    self._last_persisted_qp = live_qp_val
+                except Exception:
+                    pass
+
         ctx = TickContext(
             game_tick=curr_tick,
             position=WorldPoint(*pos_tuple),
@@ -388,7 +406,7 @@ class ExecutionEngineKernel:
             varbits=resolved_varbits,
             varps=resolved_varps,
             tutorial_varp_281=_coalesce_int((obs.get("tutorial_varp_281") or {}).get("value"), 0),
-            quest_points=_coalesce_int((obs.get("quest_points") or {}).get("value"), self.capabilities.quest_points),
+            quest_points=_coalesce_int(qp_obs.get("value"), self.capabilities.quest_points),
             total_level=_coalesce_int((obs.get("total_level") or {}).get("value"), 32),
             playtime_minutes=_coalesce_int((obs.get("playtime_minutes") or {}).get("value"), 0),
             bank_is_open=bank_is_open,
@@ -437,6 +455,17 @@ class ExecutionEngineKernel:
                 postcondition_checker=lambda _post: True,
             )
             dispatched.append("INTERACT_NPC")
+
+        elif directive.directive_type == DirectiveType.USE_ITEM_ON_ITEM:
+            self.gate.dispatch_verified_command(
+                intent=self._make_intent(
+                    "USE_ITEM_ON_ITEM",
+                    dict(directive.payload),
+                    idempotency_class="NON_IDEMPOTENT",
+                ),
+                postcondition_checker=lambda _post: True,
+            )
+            dispatched.append("USE_ITEM_ON_ITEM")
 
         elif directive.directive_type == DirectiveType.CLICK_WIDGET:
             self.gate.dispatch_verified_command(

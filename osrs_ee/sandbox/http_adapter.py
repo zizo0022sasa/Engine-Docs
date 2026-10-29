@@ -107,6 +107,7 @@ class MicrobotHttpAdapter:
         self._supports_skills_endpoint: bool = True
         self._supports_dialogue_endpoint: bool = True
         self._supports_varp_run_endpoint: bool = True
+        self._supports_varp_qp_endpoint: bool = True
         self._supports_run_endpoint: bool = True
         self._supports_objects_query_endpoint: bool = True
         self._supports_profiles_endpoint: bool = True
@@ -520,6 +521,12 @@ class MicrobotHttpAdapter:
         else:
             inv_obj = {"free_slots": None, "quality": "UNKNOWN", "items": None}
 
+        qp_metric = _opt_metric("questPoints")
+        if qp_metric["quality"] == "UNKNOWN" and ("loggedIn" in status or "player" in status):
+            varp_101 = self._fetch_optional_json("/varps?id=101", flag_attr="_supports_varp_qp_endpoint")
+            if isinstance(varp_101, dict) and isinstance(varp_101.get("value"), int) and int(varp_101["value"]) >= 0:
+                qp_metric = {"value": int(varp_101["value"]), "quality": "KNOWN"}
+
         obs: dict[str, Any] = {
             "schema_version": "1.0",
             "observation_id": f"http_obs_{self._obs_seq:06d}",
@@ -534,7 +541,7 @@ class MicrobotHttpAdapter:
             "world": status.get("world"),
             "position": pos,
             "tutorial_varp_281": varp_obj,
-            "quest_points": _opt_metric("questPoints"),
+            "quest_points": qp_metric,
             "total_level": _opt_metric("totalLevel"),
             "playtime_minutes": _opt_metric("playtimeMinutes"),
             "dialogue_open": dialogue_open,
@@ -579,6 +586,30 @@ class MicrobotHttpAdapter:
                     "POST",
                     "/inventory/interact",
                     {"id": int(payload["item_id"]), "action": "Eat"},
+                )
+            )
+        if command_type == "USE_ITEM_ON_ITEM":
+            src_id = int(payload["source_item_id"])
+            dst_id = int(payload["target_item_id"])
+            r_src = _normalize_command_response(
+                self._request_json(
+                    "POST",
+                    "/inventory/interact",
+                    {"id": src_id, "action": "Use"},
+                )
+            )
+            if not r_src.get("ok"):
+                return r_src
+            # Match upstream Microbot Rs2Inventory.combine(primary, secondary) 150ms client frame delay
+            # so WIDGET_TARGET sets isItemSelected()=true before WIDGET_TARGET_ON_WIDGET fires.
+            delay_s = max(0.0, float(payload.get("combine_delay_sec", 0.15)))
+            if delay_s > 0:
+                time.sleep(delay_s)
+            return _normalize_command_response(
+                self._request_json(
+                    "POST",
+                    "/inventory/interact",
+                    {"id": dst_id, "action": "Use"},
                 )
             )
         if command_type == "SET_RUN_MODE":
