@@ -166,3 +166,35 @@ property is preserved, not weakened.
 Test-facility addition: `FakeGameAdapter(walk_speed_tiles_per_tick=N)` now models a real client that
 keeps walking between ticks (default `None` = legacy instant teleport, so all 81 previous tests are
 byte-identical), plus faithful Jagex behaviour where an empty run bar auto-disables run.
+
+---
+
+## 10. `PR-19.2` — Movement-first invariant (field incident #2)
+
+### What the field proved (live `acc_02`, ~992 ticks, stalled at Lumbridge `(3190, 3273)`)
+`PR-19.1` let `_travel()` return `SET_RUN_MODE` **instead of** `NAVIGATE_TO`. The client lagged in
+reporting `runEnabled=True`, so the engine re-issued the toggle every tick, the character never moved,
+and the (correct) progress guard finally declared the route unreachable. **The bot was healthy — the
+directive layer was wrong.**
+
+### The invariant
+> **A tick that can walk MUST walk. Side actions ride alongside; they never displace movement.**
+
+| Component | Before (`PR-19.1`) | After (`PR-19.2`) |
+|---|---|---|
+| `_travel()` | could return `SET_RUN_MODE` **instead of** `NAVIGATE_TO` | **always** returns `NAVIGATE_TO` (zero run logic in the engine — statically asserted) |
+| Run enabling | engine directive (blocking the walk) | kernel **pipelined side command** in the SAME tick as `WALK_TO_WORLD_POINT` |
+| Spam protection | none | shared `travel_run_assist_cooldown_ticks` (10) across assist **and** watchdog/boot path; never two toggles in one tick; danger pulses still immediate |
+
+### New verification (`90 passed`)
+
+| Test | Proves |
+|---|---|
+| `T77` *(rewritten)* | `_travel()` returns `NAVIGATE_TO` for every run state (`25% off`, `60% on`, `19%`, `None`, `100%`) |
+| `T80` | with `runEnabled` frozen to `False` forever (the exact field scenario), the bot still walks 150+ tiles, reaches the coop and collects the egg — **no escalation** |
+| `T81` | the tick that enables run also contains `WALK_TO_WORLD_POINT` (side channel, not substitution) |
+| `T82` | ≤ 1 toggle per tick and total toggles bounded by the cooldown budget (no per-tick spam) |
+
+`T33` (pre-existing) still passes byte-identically: the low-HP danger tick keeps the exact dispatch
+order `("CONSUME_FOOD", "SET_RUN_MODE", "WALK_TO_WORLD_POINT")` — the assist detects the toggle and
+stays silent instead of duplicating it.

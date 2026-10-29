@@ -127,27 +127,20 @@ def test_t76_distance_oscillation_does_not_reset_the_guard() -> None:
 # ---------------------------------------------------------------------------
 # T77 — run re-enable during travel
 # ---------------------------------------------------------------------------
-def test_t77_run_is_reenabled_at_20_percent_and_never_spammed() -> None:
-    """T77 (`PR-19.1`): while travelling, a recovered run bar (>= 20%) is switched back on with
-    `SET_RUN_MODE`, and the engine stays silent once run is already enabled (no command spam)."""
+def test_t77_travel_never_returns_a_run_toggle_instead_of_a_walk() -> None:
+    """T77 (`PR-19.2` contract): `_travel()` ALWAYS yields `NAVIGATE_TO`. In `PR-19.1` it could return
+    `SET_RUN_MODE` instead of the walk, which livelocked the bot in the field whenever the client
+    lagged in reporting `run_enabled=True`.
+    """
     engine = ZeroTouchSupplyEngine()
-    mid = WorldPoint(3134, 3401, 0)
-
-    d = engine.ensure(_ctx(mid, run_energy_pct=25, run_enabled=False), EGG_ID, 1)
-    assert d is not None and d.directive_type == DirectiveType.SET_RUN_MODE
-    assert d.payload == {"enabled": True}
-
-    # already running -> plain navigation, never a redundant SET_RUN_MODE
-    d = engine.ensure(_ctx(mid, run_energy_pct=60, run_enabled=True), EGG_ID, 1)
-    assert d is not None and d.directive_type == DirectiveType.NAVIGATE_TO
-
-    # bar still too low (19%) -> walk on foot, do not waste a dispatch
-    d = engine.ensure(_ctx(mid, run_energy_pct=19, run_enabled=False), EGG_ID, 1)
-    assert d is not None and d.directive_type == DirectiveType.NAVIGATE_TO
-
-    # adapter that does not report run energy (None) must never be treated as 0%
-    d = engine.ensure(_ctx(mid, run_energy_pct=None, run_enabled=False), EGG_ID, 1)
-    assert d is not None and d.directive_type == DirectiveType.NAVIGATE_TO
+    mid = WorldPoint(3134, 3401, 0)  # exactly where the live session stalled at tick 992
+    for energy, enabled in ((25, False), (60, True), (19, False), (None, False), (100, False)):
+        d = engine.ensure(_ctx(mid, run_energy_pct=energy, run_enabled=enabled), EGG_ID, 1)
+        assert d is not None
+        assert d.directive_type == DirectiveType.NAVIGATE_TO, (
+            f"travel must never be displaced by a run toggle (energy={energy}, enabled={enabled})"
+        )
+        assert d.destination == "LUMBRIDGE_CHICKEN_COOP"
 
 
 # ---------------------------------------------------------------------------

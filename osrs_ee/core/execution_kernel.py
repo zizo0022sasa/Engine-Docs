@@ -78,6 +78,11 @@ class ExecutionEngineKernel:
         self._last_seen_tick: int | None = None
         self._internal_tick_counter: int = 0
         self._session_run_bootstrapped: bool = False
+        # `PR-19.2` travel run-assist: a throttled SIDE-CHANNEL toggle that never replaces a walk.
+        self.travel_run_assist_min_energy: int = 20
+        self.travel_run_assist_cooldown_ticks: int = 10
+        self._last_run_assist_tick: int = -(10**6)
+        self._last_run_toggle_tick: int = -(10**6)
         self._active_task_id: str = ""
         self._last_known_bank_items: tuple[dict[str, Any], ...] = ()
         self._last_persisted_qp: int | None = None
@@ -344,8 +349,13 @@ class ExecutionEngineKernel:
         # PR-15 Req #1: Auto-enable Run on session start, underground Floor 4, or when Watchdog requests it
         in_sepulchre_floor_4 = 2300 <= pos_tuple[0] <= 2380 and pos_tuple[1] >= 5180
         force_boot_run = (not self._session_run_bootstrapped or in_sepulchre_floor_4) and (not run_enabled_val) and (run_energy_val >= 5)
-        if safety.enable_run or force_boot_run:
+        # `PR-19.2`: a client that lags in reporting `runEnabled` must never be spammed with toggles.
+        # Throttle the boot/watchdog path to the same cooldown, EXCEPT when actually threatened
+        # (in_danger), where an immediate re-assert is intentional.
+        _toggle_ready = (curr_tick - self._last_run_toggle_tick) >= self.travel_run_assist_cooldown_ticks
+        if (safety.enable_run or force_boot_run) and (_toggle_ready or safety.in_danger):
             self._session_run_bootstrapped = True
+            self._last_run_toggle_tick = curr_tick
             self.gate.dispatch_pipelined_command(
                 intent=self._make_intent(
                     "SET_RUN_MODE",
@@ -436,6 +446,16 @@ class ExecutionEngineKernel:
                     )
                 )
                 dispatched.append("WALK_TO_WORLD_POINT")
+                # `PR-19.2`: run is enabled as a Pipelined side command in the SAME tick as the walk.
+                # It must never replace movement (that livelocked the bot in the field), and it is
+                # throttled so a client that lags in reporting `runEnabled` cannot cause command spam.
+                if self._maybe_dispatch_travel_run_assist(
+                    curr_tick=curr_tick,
+                    run_energy=run_energy_opt,
+                    run_enabled=run_enabled_val,
+                    dispatched=dispatched,
+                ):
+                    pass
 
         elif directive.directive_type == DirectiveType.AUTHORIZE_SURFACE_EXIT:
             self.watchdog.authorize_surface_exit()
@@ -622,6 +642,41 @@ class ExecutionEngineKernel:
             halted=(directive.directive_type == DirectiveType.COMPLETE_TASK),
             detail=directive.reason or safety.detail,
         )
+
+    def _maybe_dispatch_travel_run_assist(
+        self,
+        *,
+        curr_tick: int,
+        run_energy: int | None,
+        run_enabled: bool,
+        dispatched: list[str],
+    ) -> bool:
+        """Enable run while travelling, without ever displacing the walk command.
+
+        Returns `True` when a `SET_RUN_MODE` side command was dispatched this tick. Silent when:
+        the adapter did not report run energy, run is already on, the bar is below the threshold, or
+        the cooldown has not elapsed (a lagging client must not be spammed).
+        """
+        if run_energy is None or run_enabled:
+            return False
+        # Never double-toggle in one tick: the watchdog/boot-run pulse already covered this tick.
+        if "SET_RUN_MODE" in dispatched:
+            self._last_run_assist_tick = curr_tick
+            return False
+        if run_energy < self.travel_run_assist_min_energy:
+            return False
+        if curr_tick - self._last_run_assist_tick < self.travel_run_assist_cooldown_ticks:
+            return False
+        self._last_run_assist_tick = curr_tick
+        self.gate.dispatch_pipelined_command(
+            intent=self._make_intent(
+                "SET_RUN_MODE",
+                {"enabled": True},
+                idempotency_class="IDEMPOTENT",
+            )
+        )
+        dispatched.append("SET_RUN_MODE")
+        return True
 
     def _execute_nonblocking_bank_turnaround(
         self,

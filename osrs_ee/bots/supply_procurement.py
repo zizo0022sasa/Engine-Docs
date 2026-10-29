@@ -29,8 +29,10 @@ Design invariants:
 - **Progress-aware walk guard**: the walk budget counts only ticks in which the distance to the target
   did NOT shrink. A healthy 210-tile GE -> Lumbridge trek can never be aborted again; a genuinely
   blocked route (no distance reduction) still escalates with `SUPPLY_AREA_UNREACHABLE`.
-- **Run-aware travel**: while routing, the engine re-enables run (`SET_RUN_MODE`) as soon as the bar
-  recovers to `run_min_energy_pct` (20%), and stays silent when run is already on (never spams).
+- **Run-aware travel** (superseded by `PR-19.2`): run is a kernel side-channel, never a directive.
+- **`PR-19.2` movement-first invariant**: `_travel()` ALWAYS returns `NAVIGATE_TO`; run enabling is a
+  pipelined side command in the same tick as the walk (with a cooldown), so a client that lags in
+  reporting `run_enabled=True` can never livelock the journey.
 - **Plane-safe climbing**: `CLIMB` steps move the bot between floors (Lumbridge Castle spinning wheel
   lives on plane 1) instead of demanding a walk to an unreachable tile, with
   `SUPPLY_CLIMB_FAILED` as the precise diagnostic when a staircase cannot be used.
@@ -496,7 +498,7 @@ class ZeroTouchSupplyEngine:
     # distance to the target), NOT total walk ticks. The live run proved the old 120-tick cap aborted a
     # perfectly healthy 210-tile GE -> Lumbridge trek at tick 337 while the bot was still progressing.
     max_walk_attempts: int = 350
-    # Re-enable run while travelling once the bar recovers past this percentage.
+    # Superseded by the kernel travel run-assist (`PR-19.2`): the engine itself never toggles run.
     run_min_energy_pct: int = 20
     _attempts: dict[tuple[int, int], int] = field(default_factory=dict)
     _alias_cursor: dict[tuple[int, int], int] = field(default_factory=dict)
@@ -714,20 +716,14 @@ class ZeroTouchSupplyEngine:
         return step.area.label
 
     def _travel(self, ctx: TickContext, step: SupplyStep, recipe: SupplyRecipe) -> TaskDirective:
-        """Walk toward `step.area`, re-enabling run first whenever the bar has recovered."""
-        if (
-            ctx.run_energy_pct is not None
-            and ctx.run_energy_pct >= self.run_min_energy_pct
-            and not ctx.run_enabled
-        ):
-            return TaskDirective(
-                directive_type=DirectiveType.SET_RUN_MODE,
-                payload={"enabled": True},
-                reason=(
-                    f"Zero-Touch travel: run energy {ctx.run_energy_pct}% >= {self.run_min_energy_pct}% "
-                    f"while routing to {step.area.label if step.area else recipe.label}"
-                ),
-            )
+        """Walk toward `step.area`. ALWAYS returns `NAVIGATE_TO` — never anything else.
+
+        `PR-19.2` invariant: movement is never traded for a run toggle. Returning `SET_RUN_MODE` here
+        (the `PR-19.1` behaviour) livelocked the bot whenever the client lagged in reporting
+        `run_enabled=True`: it re-issued the toggle every tick instead of walking, and the progress
+        guard then (correctly) declared the route unreachable. Run enabling is a SIDE-CHANNEL command
+        dispatched *alongside* the walk by `ExecutionEngineKernel`, exactly like the watchdog pulse.
+        """
         return TaskDirective(
             directive_type=DirectiveType.NAVIGATE_TO,
             destination=self._destination(step),
