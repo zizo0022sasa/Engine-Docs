@@ -6,16 +6,15 @@
 
 ## 1. الحالة الراهنة للمشروع (`Current Snapshot`)
 
-* **المرحلة الحالية:** **اكتمال حزمة الإشعارات الذكية عبر `BoundedOutbox` وماسح اكتشاف الحسابات الشامل لأي مستوى (`PR-17`: `SmartEventNotifier` بأربعة أحداث عالية القيمة فقط بدون إزعاج دوري `Zero Tick Spam` + `UniversalAccountScanner` لفحص الـ 23 مهارة والقتال والعضوية والبنك والحقيبة خلال `<= 15s` وحفظ `AccountProfileSnapshot` في `state.db` + أمر `scan-profile` المستقل + مواءمة دستور الشريكين زيزو وبولا `v2.0`)**.
+* **المرحلة الحالية:** **`[STAGE2_STRONGHOLD_10K_COMPLETED_MILESTONE]` (`LIVE_WIRE_VERIFIED` — `PR-17` .. `PR-17.5` @ `4b3558f`):** اكتمال الطوابق الأربعة لحصن الأمان (`stronghold_floors_claimed: [1, 2, 3, 4]`)، واقتناص `10,000 GP` و`Fancy boots` (`item 9005`) عبر `Cradle of Life` (`23731` + `270:15`)، والصعود عبر `Bone chain` (`23732`)، والعودة لبنك `GRAND_EXCHANGE` وإيداع الغنائم كاملةً وبث إشعار التليجرام الذكي (`outbox.db` — `msg_id 25`) وفحص البروفايل الحي `scan-profile` في **`125ms`** بنسبة 100% ذاتياً دون أي نقرة يدوية.
 * **نتيجة فحص الأسرار (`Secret Scan`):** `[SECRET_SCAN_OK] Zero secret patterns detected under .`
-* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`67 passed` (0 failed)** عبر 18 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T61`.
+* **نتيجة الاختبارات الفعلية المنفذة (`pytest`):** **`72 passed` (0 failed)** عبر 18 ملف اختبار تغطي مصفوفة القبول الشاملة `T01..T66`.
 * **التمييز المعرفي الدقيق (`Epistemic Status`):**
-  * **`LIVE_WIRE_VERIFIED` (على عميل `microbot-2.6.34.jar` الحي — `127.0.0.1:8081` + تشغيل حي داخل عالم OSRS على `acc_02` في Run 1 & Run 2 & Run 3):**
-    1. استجابة `GET /state` في `<10ms` وثبات `HTTP/1.1 Keep-Alive`، وبوابة التليجرام الحية `@orangeconnebot` (`/status`).
-    2. **Run 3 (`PR-15`):** إثبات حي كامل لبروتوكول الاكتفاء الذاتي (`Zero-Touch Fallback`) وتفعيل الجري الذاتي (`run_enabled: true`): فحص الحقيبة `(1/6)` -> الذهاب لبنك دراينور وفحصه -> التوجه لمستنقع لومبريدج -> أخذ شبكة الصيد مجاناً من المدرب -> صيد `11x Raw shrimps` -> قطع `400+` بلاطة بدم `10/10 HP` حتى مدخل كوبري البرابرة `(3105, 3420)`.
-    3. **Run 1 & 2:** اجتياز الممر الآمن، نزول `20790`، تخطي الطابقين 1 و2 بـ `20786` و`19005`، نزول السلالم `20785`/`19004`/`23706` وتأكيد `579:17`، دخول الطابق الرابع واجتياز `Portal of Death [1/4]` وحل سؤال الأمان.
-  * **`HERMETIC_VERIFIED`:** حزمة `PR-15` + `PR-15.1` (`85422c1`) + `PR-16` (`8eb3231`) + **`PR-17`** (`T56..T61` في `test_pr17_smart_outbox_and_profile_scanner.py` — `67 passed`).
-  * **`PENDING_LIVE_RUN_3`:** التحقق الميداني الحي للجولة الثالثة (`Live Run 3`) لإتمام سحب `Fancy boots` (`270:15`) من `Cradle of Life` (`23731`)، الصعود عبر `Bone chain` (`23732`)، وإيداع الغنائم في بنك `GRAND_EXCHANGE`.
+  * **`LIVE_WIRE_VERIFIED` (على عميل `microbot-2.6.34.jar` الحي — `127.0.0.1:8081` + إتمام كامل `stage2_stronghold_10k` حياً داخل عالم OSRS على `acc_02`):**
+    1. استجابة `GET /state` في `<10ms`، وفحص `scan-profile` الشامل للـ 23 مهارة والبنك والحقيبة في **`125ms`**، وبوابة التليجرام الحية `@orangeconnebot` (`msg_id 25` عبر `BoundedOutbox`).
+    2. **بروتوكول الاكتفاء الذاتي والحماية (`PR-15` .. `PR-17.4`):** تفعيل الجري الذاتي (`Varp 173`)، صيد الجمبري من مستنقع لومبريدج، عبور كوبري البرابرة، وحماية `ReactiveSafetyWatchdog` الحية للحساب عند نقص الطعام (`HP=6 <= 7`).
+    3. **إتمام حصن الأمان من الطابق 1 إلى إيداع بنك الـ GE (`PR-17.2` .. `PR-17.5` — `task-11512`):** عبور البوابات المختصرة التراكمية (`20786`, `19005`, `23707`) في 28 ثانية، حل **23+ سؤال أمان متتالياً** بنسبة 100% عبر `SH_KNOWN_ANSWER_MATCH` لعنوان `"Select an option"`، عبور بوابات `Portal of Death` الأربع دون تذبذب، فتح `Cradle of Life` (`23731` + `270:15`)، الصعود بـ `Bone chain` (`23732`)، وإيداع `Fancy boots` (`9005`) والغنائم في بنك `GRAND_EXCHANGE` وإغلاق المهمة بـ `COMPLETE_TASK` وانتقال الحساب تلقائياً لـ `stage1a_f2p_quests_10qp` و`stage1b_seasoning_gatherer`.
+  * **`HERMETIC_VERIFIED`:** كامل حزم `PR-00` .. `PR-17.5` (`72 passed`, `0 failed` عبر `T01..T66`).
 
 ---
 
@@ -41,7 +40,8 @@
 | **`PR-15`** | `58adeb9` | تفعيل الجري الذاتي غير المتذبذب (`Varp 173` + `160:27`)، التجهيز التلقائي للطعام قبل المغامرة (`DRAYNOR_BANK` + سقوط تلقائي لصيد وطهي الجمبري عند خلو البنك + تطبيع `bank.items`)، العداد الرتيب الداخلي عند `game_tick is None`، وتوسيع مدى عبور بوابات الطابق الرابع إلى `chebyshev_distance <= 2` مع حسم معرف الباب الأمامي (`23728` مقابل `23727`) وفلتر `Widget 270`. | `56 passed` (`T01..T50`) |
 | **`PR-15.1`** | `85422c1` | ربط حافتي `safe_bridge_east_to_barbarian_river_fire` (`14.0`) و`safe_barbarian_river_fire_to_stronghold_entrance` (`26.0`)، ومنع تكرار `POST /walk` اللحظي عبر مهلة Debounce مقدارها `5` نبضات (`3.0s`) على السطح، واستئناف الطهي الذكي من الكوبري مباشرة وعبر رسائل ترقية مستوى الطبخ حتى اكتمال الشواء ودخول `20790`. | `57 passed` (`T01..T51`) |
 | **`PR-16`** | `8eb3231` | تحرير الجلسات اليتيمة الواعي بـ `owner_pid` و`heartbeat_at` دون لمس السلوتات الحية، المصالحة الحية التلقائية داخل `attach-bot` وأمر `reconcile` المستقل (`RECOVERY_REQUIRED -> RECONCILING -> READY`)، تهيئة `UTF-8` و`_safe_print` ضد كراش `Windows CP1252`، ودعم `/add_account` و`/accounts` و`/reconcile` عبر التليجرام مع المسح التلقائي `deleteMessage` وتوثيق `docs/zizo_bolla_field_testing_protocol.md`. | `61 passed` (`T01..T55`) |
-| **`PR-17`** | `HEAD` | ربط `ExecutionEngineKernel` و`attach-bot` و`reconcile` بـ `SmartEventNotifier` فوق `BoundedOutbox` لبث 4 إشعارات عالية القيمة فقط (`🚀 بدء جلسة`, `🏆 إتمام وإيداع غنائم`, `🚨 طوارئ P0`, `🔧 استرداد تلقائي`) بصفر إزعاج دوري، وبناء `UniversalAccountScanner` (`<= 15s` للـ 23 مهارة والقتال والعضوية والبنك والحقيبة) مع حفظ `AccountProfileSnapshot` في `state.db` وأمر `scan-profile`. | **`67 passed`** (`T01..T61`) |
+| **`PR-17`** | `0a07fbd` | ربط `ExecutionEngineKernel` و`attach-bot` و`reconcile` بـ `SmartEventNotifier` فوق `BoundedOutbox` لبث 4 إشعارات عالية القيمة فقط (`🚀 بدء جلسة`, `🏆 إتمام وإيداع غنائم`, `🚨 طوارئ P0`, `🔧 استرداد تلقائي`) بصفر إزعاج دوري، وبناء `UniversalAccountScanner` (`<= 15s` للـ 23 مهارة والقتال والعضوية والبنك والحقيبة) مع حفظ `AccountProfileSnapshot` في `state.db` وأمر `scan-profile`. | `67 passed` (`T01..T61`) |
+| **`PR-17.1..5`** | `fac60b0` .. `4b3558f` | التحصينات الجراحية الميدانية لإتمام الطابق الرابع والعودة لبنك `GRAND_EXCHANGE` حياً (`LIVE_WIRE_VERIFIED` — `task-11512`): مهلة `20` نبضة للمشي السطحي مقابل `5` تحت الأرض، مطابقة `"Select an option"` عبر `SH_KNOWN_ANSWER_MATCH` ونار القرية `(3078, 3445)`، وضبط حدود بوابات الطابق الرابع (`max_dist=1`, `px >= 2359`, `5223 <= py <= 5225`) حتى إيداع `Fancy boots` (`9005`) والـ `10,000 GP` وإرسال إشعار `outbox.db` (`msg_id 25`). | **`72 passed`** (`T01..T66`) |
 
 ---
 
