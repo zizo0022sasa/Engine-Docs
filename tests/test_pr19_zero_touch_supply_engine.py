@@ -339,10 +339,6 @@ def _zero_touch_world(command_type: str, payload: dict[str, Any], adapter: FakeG
             elif inv.get(REDBERRY_ID, 0) >= 3:
                 take(REDBERRY_ID, 3)
                 add(RED_DYE_ID, "Red dye")
-        elif name == "Dairy cow":
-            if inv.get(BUCKET_ID, 0) >= 1:
-                take(BUCKET_ID, 1)
-                add(BUCKET_OF_MILK_ID, "Bucket of milk")
         elif name == "Sheep":
             if inv.get(SHEARS_ID, 0) >= 1:
                 add(WOOL_ID, "Wool")
@@ -374,7 +370,12 @@ def _zero_touch_world(command_type: str, payload: dict[str, Any], adapter: FakeG
                 adapter.varps[62] = 6
                 adapter.quest_points += 5
     elif command_type == "INTERACT_OBJECT":
-        if name in ("Staircase", "Stairs"):
+        if name == "Dairy cow":  # PR-19.5: the milkable cow is an OBJECT (id 8689), not an NPC
+            assert payload.get("id") == 8689, payload
+            if inv.get(BUCKET_ID, 0) >= 1:
+                take(BUCKET_ID, 1)
+                add(BUCKET_OF_MILK_ID, "Bucket of milk")
+        elif name in ("Staircase", "Stairs"):
             if payload.get("action") == "Climb-up":
                 adapter.position = {"x": 3156, "y": 3435, "plane": 1}
             elif payload.get("action") == "Climb-down":

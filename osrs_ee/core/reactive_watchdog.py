@@ -59,6 +59,7 @@ class SafetyVerdict(StrEnum):
     PIPELINED_EAT_AND_MOVE = "PIPELINED_EAT_AND_MOVE"
     AWAITING_NEXT_TICK_HEAL = "AWAITING_NEXT_TICK_HEAL"
     EMERGENCY_NO_FOOD_EVACUATE = "EMERGENCY_NO_FOOD_EVACUATE"
+    EMERGENCY_NO_FOOD_FLEE = "EMERGENCY_NO_FOOD_FLEE"
     EAT_UNCONFIRMED_EVACUATE = "EAT_UNCONFIRMED_EVACUATE"
     UNEXPECTED_DISPLACEMENT_HALT = "UNEXPECTED_DISPLACEMENT_HALT"
     PLAYER_DEAD_QUARANTINE = "PLAYER_DEAD_QUARANTINE"
@@ -190,7 +191,10 @@ class ReactiveSafetyWatchdog:
                         in_danger=True,
                         preserve_movement=False,
                         halt_session=True,
-                        detail="No HP increase observed after max game-tick confirmation window",
+                        detail=(
+                            "No HP increase observed after max game-tick confirmation window "
+                            f"(HP={hp_current} <= {effective_eat_threshold})"
+                        ),
                     )
 
         low_hp = hp_current <= effective_eat_threshold
@@ -231,12 +235,35 @@ class ReactiveSafetyWatchdog:
             None,
         )
         if food_item is None:
+            # `PR-19.5` **ANTI-SAFETY-FREEZE**: on the SURFACE with no food, halting in place is the most
+            # dangerous possible action — it parks a level-3 account inside an aggressor's attack range
+            # (live `acc_02`: a Highwayman near Draynor dropped HP to 8, and the freeze itself became the
+            # risk). Instead: keep running away with `preserve_movement=True`.
+            # Inside a real dungeon (authorized-exit regions) the legacy hard halt is preserved — you
+            # cannot outrun dungeon geometry, and a death there is unrecoverable.
+            region = classify_underground(x, y)
+            in_protected_dungeon = region is not None and region.requires_authorized_exit
+            if not in_protected_dungeon:
+                return SafetyDecision(
+                    verdict=SafetyVerdict.EMERGENCY_NO_FOOD_FLEE,
+                    in_danger=True,
+                    preserve_movement=True,
+                    halt_session=False,
+                    enable_run=True,
+                    detail=(
+                        f"HP={hp_current} <= {effective_eat_threshold} with zero verified food: "
+                        f"fleeing (surface) instead of freezing inside attack range"
+                    ),
+                )
             return SafetyDecision(
                 verdict=SafetyVerdict.EMERGENCY_NO_FOOD_EVACUATE,
                 in_danger=True,
                 preserve_movement=False,
                 halt_session=True,
-                detail=f"HP={hp_current} <= {self.eat_hp_threshold} with zero verified food remaining",
+                detail=(
+                    f"HP={hp_current} <= {effective_eat_threshold} with zero verified food remaining "
+                    f"underground ({region.name if region else 'unknown'})"
+                ),
             )
 
         food_id = int(food_item["item_id"])

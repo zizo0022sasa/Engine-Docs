@@ -60,6 +60,10 @@ class TickContext:
     # be collapsed into `0` or `False` (never assume a drained run bar).
     run_energy_pct: int | None = None
     run_enabled: bool = False
+    # `PR-19.5`: last PERSISTED bank contents (`state.db` -> `AccountProfileSnapshot.bank_summary`).
+    # A restarted session must not re-walk 200 tiles to the GE just to re-learn what is already on disk.
+    bank_summary: tuple[Mapping[str, Any], ...] = ()
+    bank_summary_scanned_at: str = ""
 
 
 @dataclass(frozen=True)

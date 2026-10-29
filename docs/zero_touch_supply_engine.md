@@ -298,3 +298,69 @@ cross-map `/walk` can never happen.
 | `T89` | unknown caves stay **fail-closed**; a 260-tile in-dungeon jump still halts |
 | `T90` | the engine emits `AUTHORIZE_SURFACE_EXIT` from the cellar, walks normally on the surface, and escalates `SUPPLY_EXIT_REQUIRED` only for **unregistered** regions |
 | `T91` | full kernel replay: egg → bucket → cellar exit → milk, zero escalation, ends above ground |
+
+---
+
+## 13. `PR-19.5` — Six field-proven corrections (live `acc_02`)
+
+### Confirmed field wins before this patch
+| Tick | Result |
+|---|---|
+| 894 | `TAKE_GROUND_ITEM "Egg"` → **Egg (1944)** ✅ |
+| 1076 | `TAKE_GROUND_ITEM "Bucket"` → **Bucket (1925)** ✅ |
+| ~811 | `Bucket of milk` → `SUPPLY_STEP_STALLED` ❌ |
+| 135 | `IN_DANGER` freeze inside a Highwayman's reach ❌ |
+| re-attach | 200-tile walk back to the GE just to re-audit the bank ❌ |
+
+### 1. The dairy cow is **scenery**, not an NPC (the decisive fix)
+Live probe evidence:
+* `GET /npcs` → only `Cow` (2790) and `Cow calf` (2794) — **neither can be milked**.
+* `GET /objects?name=Dairy cow` → `{id: 8689, name: "Dairy cow", position: {3172, 3317}}`.
+* `INTERACT_OBJECT {id: 8689, action: "Milk"}` → success, milk appears in the bag.
+
+`Milk` sent to `/npcs/interact` returns `ok:true` but **produces nothing**, so the engine burned its
+whole attempt budget. The recipe now uses `SupplyStepKind.OBJECT` with `object_id=8689`, and
+`SupplyStep.object_id` is emitted in the payload so the client targets the exact scenery instead of
+matching a display name.
+
+### 2. Anti-Safety-Freeze (watchdog)
+`EMERGENCY_NO_FOOD_EVACUATE` used to **halt in place**, parking a level-3 account inside an aggressor's
+attack range — the freeze itself became the danger. Now:
+
+| Situation | Verdict | Movement |
+|---|---|---|
+| Surface / shallow cellar, no food | `EMERGENCY_NO_FOOD_FLEE` | **keeps moving**, `enable_run=True` |
+| Real dungeon (`requires_authorized_exit`) | `EMERGENCY_NO_FOOD_EVACUATE` | hard halt (unchanged) |
+
+### 3. Log-message bug
+The detail string printed the **base** threshold (`HP=8 <= 7` — nonsense) instead of the effective one.
+It now always quotes `effective_eat_threshold`, in both the no-food and unconfirmed-eat branches.
+
+### 4. Bank stock survives a restart
+`_bank_audit_done` was in-memory, so a re-attach walked 200+ tiles to the GE purely to re-open the
+bank. Now the kernel injects the persisted `AccountProfileSnapshot.bank_summary` from `state.db`
+(cached once per session) into `TickContext.bank_summary`, and the audit resolves as:
+
+1. live open bank → authoritative;
+2. **persisted snapshot → trusted, zero walking**;
+3. nothing known → exactly one live audit at the GE.
+
+Bonus: an item **missing** from the persisted bank no longer triggers a GE trip at all — the bot goes
+straight out to gather it.
+
+### 5. `VARROCK_EAST_CHURCH` tile
+`(3254, 3483)` sits on the church's outer wall → field-measured `(3253, 3482)`.
+
+### 6. Test world-scripts
+`Dairy cow` moved from the `INTERACT_NPC` branch to `INTERACT_OBJECT` (asserting `id == 8689`) so the
+kitchen-sink world simulation matches the live client.
+
+### New verification (`105 passed`)
+| Test | Proves |
+|---|---|
+| `T92` | cow = OBJECT `8689`, `Milk` action, id present in the emitted payload |
+| `T93` | surface/cellar → flee (no halt, run on); dungeon → hard halt preserved |
+| `T94` | freeze message quotes the effective threshold, never the base one |
+| `T95` | persisted bank → **no GE walk**; empty snapshot → one live audit; missing item → gather, no GE |
+| `T96` | church tile is `(3253, 3482)` |
+| `T97` | kernel run with `state.db` snapshot: audit restored from disk, flour recognised as banked |

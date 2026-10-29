@@ -99,6 +99,7 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         self.supply = ZeroTouchSupplyEngine()
         self._bank_audit_done = False
         self._bank_stock: dict[int, int] = {}
+        self._bank_source: str = "UNKNOWN"
 
     @property
     def module_id(self) -> str:
@@ -157,24 +158,59 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         )
 
     def _audit_bank_once(self, ctx: TickContext) -> TaskDirective | None:
-        """Single one-shot live bank audit at the GE anchor (never re-walks to the GE again)."""
+        """Bank stock snapshot, resolved WITHOUT a pointless trek.
+
+        `PR-19.5`: a restarted session used to lose the in-memory `_bank_audit_done` flag and walk back
+        to the GE (200+ tiles) merely to re-open the bank for one tick, even though `state.db` already
+        holds `AccountProfileSnapshot.bank_summary`. Now:
+          1. live open bank  -> authoritative audit (as before);
+          2. persisted snapshot from `state.db` -> trusted immediately, NO walk at all;
+          3. nothing known   -> one single live audit at the GE anchor.
+        """
         if self._bank_audit_done:
             return None
+        if ctx.bank_is_open and ctx.position.plane == 0:
+            if ctx.position.chebyshev_distance(WorldPoint(3164, 3487, 0)) <= 4 or ctx.bank_items:
+                audited_ids = self._audited_item_ids()
+                self._bank_stock = {
+                    iid: _inv_count(ctx.bank_items, item_id=iid, noted=False) for iid in audited_ids
+                }
+                self._bank_audit_done = True
+                self._bank_source = "LIVE"
+                return TaskDirective(
+                    directive_type=DirectiveType.WAIT_NEXT_TICK,
+                    reason=(
+                        "Zero-Touch supply: bank audited live "
+                        f"({sum(1 for v in self._bank_stock.values() if v)} usable stacks)"
+                    ),
+                )
+        if ctx.bank_summary:
+            audited_ids = self._audited_item_ids()
+            self._bank_stock = {
+                iid: _inv_count(ctx.bank_summary, item_id=iid, noted=False) for iid in audited_ids
+            }
+            self._bank_audit_done = True
+            self._bank_source = f"PERSISTED({ctx.bank_summary_scanned_at or 'unknown'})"
+            return TaskDirective(
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
+                reason=(
+                    "Zero-Touch supply: bank stock restored from state.db "
+                    f"({sum(1 for v in self._bank_stock.values() if v)} usable stacks)"
+                ),
+            )
         if ctx.position.plane != 0 or ctx.position.chebyshev_distance(WorldPoint(3164, 3487, 0)) > 4 or not ctx.bank_is_open:
             return self._goto_anchor_bank(ctx, "Zero-Touch supply: auditing GE bank stock once")
-        audited_ids = set(self.supply.recipes.keys()) | {
+        return TaskDirective(
+            directive_type=DirectiveType.WAIT_NEXT_TICK,
+            reason="Zero-Touch supply: waiting for the live bank snapshot",
+        )
+
+    def _audited_item_ids(self) -> set[int]:
+        return set(self.supply.recipes.keys()) | {
             EGG_ID, BUCKET_OF_MILK_ID, POT_OF_FLOUR_ID, BALL_OF_WOOL_ID, CADAVA_BERRIES_ID,
             RED_DYE_ID, YELLOW_DYE_ID, BLUE_DYE_ID, ORANGE_DYE_ID, GOBLIN_MAIL_ID,
             ORANGE_GOBLIN_MAIL_ID, BLUE_GOBLIN_MAIL_ID,
         }
-        self._bank_stock = {
-            iid: _inv_count(ctx.bank_items, item_id=iid, noted=False) for iid in audited_ids
-        }
-        self._bank_audit_done = True
-        return TaskDirective(
-            directive_type=DirectiveType.WAIT_NEXT_TICK,
-            reason=f"Zero-Touch supply: bank audited ({sum(1 for v in self._bank_stock.values() if v)} usable stacks)",
-        )
 
     def _procure(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
         """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""

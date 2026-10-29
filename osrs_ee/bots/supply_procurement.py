@@ -54,6 +54,7 @@ from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
 # ---------------------------------------------------------------------------
 # Verified OSRS item IDs (OSRS Wiki `Item ID`) — used across the quest bundle
 # ---------------------------------------------------------------------------
+DAIRY_COW_OBJECT_ID = 8689  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
 POT_ID = 1931
 BUCKET_ID = 1925
 GRAIN_ID = 1947
@@ -103,6 +104,9 @@ class SupplyStep:
     combine_source_id: int | None = None
     # CLIMB only: the plane this step must reach (e.g. Lumbridge Castle spinning wheel = plane 1).
     target_plane: int = 0
+    # Live-verified scenery id (from `GET /objects`). When set, the interaction targets the exact object
+    # instead of relying on display-name matching — far more robust across client rebuilds.
+    object_id: int | None = None
     # `(item_id, cumulative_quantity)` achieved when this step has completed at least once.
     produces: tuple[tuple[int, int], ...] = ()
     # Items that MUST be in inventory before this step can run (recursively procured).
@@ -187,13 +191,19 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         label="Bucket of milk",
         steps=(
             SupplyStep(
-                kind=SupplyStepKind.NPC,
+                # `PR-19.5` FIELD-PROVEN: the milkable "Dairy cow" is a **GAME OBJECT** (`id=8689`),
+                # NOT an NPC. Live probe: `GET /npcs` lists only "Cow" (2790) and "Cow calf" (2794) —
+                # plain cows cannot be milked — while `GET /objects?name=Dairy cow` returns
+                # `{id: 8689, name: "Dairy cow", position: {3172, 3317}}`. Sending `Milk` to
+                # `/npcs/interact` produced no item and burned the whole attempt budget.
+                kind=SupplyStepKind.OBJECT,
                 area=_at("LUMBRIDGE_COW_FIELD"),
                 targets=("Dairy cow",),
                 action="Milk",
+                object_id=DAIRY_COW_OBJECT_ID,
                 consumes=((BUCKET_ID, 1),),
                 produces=((BUCKET_OF_MILK_ID, 1),),
-                note="dairy cow at Lumbridge West farm (3172,3317)",
+                note="dairy cow OBJECT 8689 at Lumbridge West farm (3172,3317)",
             ),
         ),
     ),
@@ -707,9 +717,15 @@ class ZeroTouchSupplyEngine:
             )
 
         if step.kind == SupplyStepKind.OBJECT:
+            payload: dict[str, Any] = {
+                "name": self._pick_alias(recipe.item_id, idx, step),
+                "action": step.action,
+            }
+            if step.object_id is not None:
+                payload["id"] = int(step.object_id)
             return TaskDirective(
                 directive_type=DirectiveType.INTERACT_OBJECT,
-                payload={"name": self._pick_alias(recipe.item_id, idx, step), "action": step.action},
+                payload=payload,
                 reason=f"Zero-Touch supply: {step.action} {recipe.label} source ({step.note})",
             )
 

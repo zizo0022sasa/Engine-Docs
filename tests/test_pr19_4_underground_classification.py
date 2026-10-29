@@ -240,10 +240,8 @@ def test_t91_kernel_replay_egg_bucket_cellar_exit_and_milk(tmp_path: Path) -> No
     def _grants(command_type: str, payload: dict[str, Any], adapter: FakeGameAdapter) -> None:
         name = str(payload.get("name", ""))
         action = str(payload.get("action", ""))
-        if command_type == "INTERACT_OBJECT" and name in ("Staircase", "Stairs", "Ladder"):
-            if action == "Climb-up" and int(adapter.position["y"]) >= 5000:
-                adapter.position = {"x": 3209, "y": 3217, "plane": 0}  # field-verified exit tile
-        elif command_type == "INTERACT_NPC" and name == "Dairy cow":
+        if command_type == "INTERACT_OBJECT" and name == "Dairy cow":  # PR-19.5 object, not NPC
+            assert payload.get("id") == 8689, payload
             for it in list(adapter.inventory_items):
                 if int(it["item_id"]) == BUCKET_ID:
                     it["quantity"] -= 1
@@ -253,6 +251,9 @@ def test_t91_kernel_replay_egg_bucket_cellar_exit_and_milk(tmp_path: Path) -> No
             adapter._add_to_inventory(
                 {"item_id": BUCKET_OF_MILK_ID, "name": "Bucket of milk", "quantity": 1, "noted": False}
             )
+        elif command_type == "INTERACT_OBJECT" and name in ("Staircase", "Stairs", "Ladder"):
+            if action == "Climb-up" and int(adapter.position["y"]) >= 5000:
+                adapter.position = {"x": 3209, "y": 3217, "plane": 0}  # field-verified exit tile
 
     adapter = FakeGameAdapter(
         account_id="acc_02",

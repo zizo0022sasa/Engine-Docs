@@ -83,6 +83,8 @@ class ExecutionEngineKernel:
         self.travel_run_assist_cooldown_ticks: int = 10
         self._last_run_assist_tick: int = -(10**6)
         self._last_run_toggle_tick: int = -(10**6)
+        self._persisted_bank_summary: tuple[dict[str, Any], ...] | None = None
+        self._persisted_bank_scanned_at: str = ""
         self._active_task_id: str = ""
         self._last_known_bank_items: tuple[dict[str, Any], ...] = ()
         self._last_persisted_qp: int | None = None
@@ -426,6 +428,8 @@ class ExecutionEngineKernel:
             in_danger=safety.in_danger,
             run_energy_pct=run_energy_opt,
             run_enabled=run_enabled_val,
+            bank_summary=self._persisted_bank_snapshot(),
+            bank_summary_scanned_at=self._persisted_bank_scanned_at,
         )
         directive = task_module.evaluate_tick(ctx)
 
@@ -642,6 +646,22 @@ class ExecutionEngineKernel:
             halted=(directive.directive_type == DirectiveType.COMPLETE_TASK),
             detail=directive.reason or safety.detail,
         )
+
+    def _persisted_bank_snapshot(self) -> tuple[dict[str, Any], ...]:
+        """Cached `state.db` bank summary (loaded at most once per session)."""
+        if self._persisted_bank_summary is not None:
+            return self._persisted_bank_summary
+        summary: tuple[dict[str, Any], ...] = ()
+        try:
+            profile = self.gate.store.get_account_profile(self.account_id)
+            if isinstance(profile, dict):
+                raw = profile.get("bank_summary") or []
+                summary = tuple(dict(it) for it in raw if isinstance(it, (dict, Mapping)))
+                self._persisted_bank_scanned_at = str(profile.get("scanned_at") or "")
+        except Exception:  # a missing profile must never break a tick
+            summary = ()
+        self._persisted_bank_summary = summary
+        return summary
 
     def _maybe_dispatch_travel_run_assist(
         self,
