@@ -170,12 +170,32 @@ def test_t70_zero_touch_engine_recursion_repeat_gather_and_stall_escalation() ->
             {"item_id": POT_ID, "name": "Pot", "quantity": 1},
         ),
     )
+    # `PR-19.6`: the mill is now a 6-step chain (door -> ladder -> Hopper -> controls -> ladder down
+    # -> Flour bin). The world advances the player's plane exactly like the client would.
     seen: list[str] = []
-    for tick in range(1, 8):
-        d = flour_engine.ensure(hopper_ctx, POT_OF_FLOUR_ID, 1)
+    plane = 0
+    for _tick in range(1, 200):
+        ctx_i = _ctx(
+            position=WorldPoint(
+                DEFAULT_WORLD_NODES["LUMBRIDGE_WINDMILL_TOP"].x if plane == 2 else DEFAULT_WORLD_NODES["MILL_LANE_MILL"].x,
+                DEFAULT_WORLD_NODES["LUMBRIDGE_WINDMILL_TOP"].y if plane == 2 else DEFAULT_WORLD_NODES["MILL_LANE_MILL"].y,
+                plane,
+            ),
+            inventory=(
+                {"item_id": 1947, "name": "Grain", "quantity": 1},
+                {"item_id": POT_ID, "name": "Pot", "quantity": 1},
+            ),
+        )
+        d = flour_engine.ensure(ctx_i, POT_OF_FLOUR_ID, 1)
         assert d is not None
         if d.directive_type == DirectiveType.INTERACT_OBJECT:
-            seen.append(str(d.payload.get("name")))
+            name = str(d.payload.get("name"))
+            action = str(d.payload.get("action"))
+            seen.append(name)
+            if name in ("Ladder", "Staircase", "Stairs"):
+                plane = 2 if action == "Climb-up" else 0
+        if d.directive_type == DirectiveType.ESCALATE_HUMAN:
+            break
     assert seen.count("Hopper") == 1, f"hopper must be filled once, got {seen}"
     assert "Hopper controls" in seen and "Flour bin" in seen
 

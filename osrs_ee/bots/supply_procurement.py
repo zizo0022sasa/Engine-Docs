@@ -54,7 +54,11 @@ from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
 # ---------------------------------------------------------------------------
 # Verified OSRS item IDs (OSRS Wiki `Item ID`) — used across the quest bundle
 # ---------------------------------------------------------------------------
-DAIRY_COW_OBJECT_ID = 8689  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
+DAIRY_COW_OBJECT_ID = 8689
+WHEAT_OBJECT_ID = 15506        # live: `Wheat` action "Pick" at (3162,3296)
+MILL_DOOR_OBJECT_ID = 1521     # live: `Large door` (1521 / 1524) at (3166,3302)
+FLOUR_BIN_OBJECT_ID = 1781     # live: `Flour bin` at (3166,3306)
+MILL_LADDER_OBJECT_ID = 12964  # live: `Ladder` at (3164,3307)  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
 POT_ID = 1931
 BUCKET_ID = 1925
 GRAIN_ID = 1947
@@ -216,8 +220,9 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("MILL_LANE_WHEAT_FIELD"),
                 targets=("Wheat",),
                 action="Pick",
+                object_id=WHEAT_OBJECT_ID,
                 produces=((GRAIN_ID, 1),),
-                note="Mill Lane wheat field (3303-3311, 3157-3171)",
+                note="Lumbridge wheat field (3162,3296) — object 15506 `Pick`",
             ),
         ),
     ),
@@ -225,30 +230,61 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=POT_OF_FLOUR_ID,
         label="Pot of flour",
         steps=(
+            # `PR-19.6` Lumbridge windmill, verified live object ids at every stage.
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
                 area=_at("MILL_LANE_MILL"),
-                targets=("Hopper",),
-                action="Fill",
-                consumes=((GRAIN_ID, 1),),
-                note="top floor hopper: Fill, then Operate the hopper controls",
+                targets=("Large door", "Door"),
+                action="Open",
+                object_id=MILL_DOOR_OBJECT_ID,
+                # Everything the mill consumes is procured BEFORE entering: grain (wheat field) and an
+                # empty pot (kitchen) are both ground-floor errands, so the bot can never strand itself
+                # upstairs on the hopper floor looking for ingredients it should already hold.
+                consumes=((GRAIN_ID, 1), (POT_ID, 1)),
+                note="mill entrance door 1521 at (3166,3302)",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.CLIMB,
+                area=_at("MILL_LANE_MILL"),
+                targets=("Ladder", "Staircase", "Stairs"),
+                action="Climb-up",
+                target_plane=2,
+                object_id=MILL_LADDER_OBJECT_ID,
+                note="ladder 12964 up to the hopper floor (plane 2)",
             ),
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
-                area=_at("MILL_LANE_MILL"),
+                area=_at("LUMBRIDGE_WINDMILL_TOP", plane=2),
+                targets=("Hopper",),
+                action="Fill",
+                consumes=((GRAIN_ID, 1),),
+                note="top floor hopper: Fill with grain",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.OBJECT,
+                area=_at("LUMBRIDGE_WINDMILL_TOP", plane=2),
                 targets=("Hopper controls", "Hopper control"),
                 action="Operate",
-                consumes=((GRAIN_ID, 1),),
-                note="operate the controls to drop the grain into the flour bin",
+                note="operate the controls so the grain drops into the flour bin",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.CLIMB,
+                area=_at("LUMBRIDGE_WINDMILL_TOP", plane=2),
+                targets=("Ladder", "Staircase", "Stairs"),
+                action="Climb-down",
+                target_plane=0,
+                object_id=MILL_LADDER_OBJECT_ID,
+                note="back down to the ground floor",
             ),
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
                 area=_at("MILL_LANE_MILL"),
                 targets=("Flour bin",),
                 action="Empty",
+                object_id=FLOUR_BIN_OBJECT_ID,
                 consumes=((POT_ID, 1),),
                 produces=((POT_OF_FLOUR_ID, 1),),
-                note="use the pot on the ground-floor flour bin",
+                note="ground-floor flour bin 1781 (3166,3306): empty it into the Pot",
             ),
         ),
     ),
@@ -628,6 +664,11 @@ class ZeroTouchSupplyEngine:
             # nothing left to do, and walking back down to the stair tile would be a ping-pong bug.
             if step.kind == SupplyStepKind.CLIMB:
                 if ctx.position.plane == step.target_plane:
+                    # Arrived -> remember it, otherwise a LATER climb-down would re-trigger this
+                    # climb-up forever (stair ping-pong observed while validating the mill chain).
+                    self._done.add(key)
+                    continue
+                if key in self._done:
                     continue
                 if ctx.bank_is_open:
                     return TaskDirective(
@@ -639,12 +680,15 @@ class ZeroTouchSupplyEngine:
                 self._walk_attempts[key] = climbs
                 if climbs > self.max_climb_attempts:
                     return self._escalate(f"SUPPLY_CLIMB_FAILED:{step.area.label if step.area else recipe.label}")
+                climb_payload: dict[str, Any] = {
+                    "name": self._pick_alias(recipe.item_id, idx, step),
+                    "action": step.action or "Climb-up",
+                }
+                if step.object_id is not None:
+                    climb_payload["id"] = int(step.object_id)
                 return TaskDirective(
                     directive_type=DirectiveType.INTERACT_OBJECT,
-                    payload={
-                        "name": self._pick_alias(recipe.item_id, idx, step),
-                        "action": step.action or "Climb-up",
-                    },
+                    payload=climb_payload,
                     reason=f"Zero-Touch supply: climbing to plane {step.target_plane} for {recipe.label}",
                 )
 

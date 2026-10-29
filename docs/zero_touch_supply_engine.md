@@ -364,3 +364,49 @@ kitchen-sink world simulation matches the live client.
 | `T95` | persisted bank → **no GE walk**; empty snapshot → one live audit; missing item → gather, no GE |
 | `T96` | church tile is `(3253, 3482)` |
 | `T97` | kernel run with `state.db` snapshot: audit restored from disk, flour recognised as banked |
+
+---
+
+## 14. `PR-19.6` — Lumbridge windmill chain & coordinate sanity (field incident #5)
+
+### The funniest bug so far 😅
+Tick 221: `SUPPLY_STEP_STALLED:Grain:OBJECT:Wheat`. The recorded wheat-field tile `(3307, 3163)` is
+inside the **Al Kharid Palace throne room** — the bot was standing next to `Throne (1108)` and
+`Vase (583)` trying to pick wheat from the Emir's carpet.
+
+Root cause: the wiki's raw pages carry several `{{Map}}` pin sets, and I read the wrong one. **The field
+probe is the authority; the wiki is a hint.**
+
+### Live-verified Lumbridge windmill ground truth (now in the graph)
+| Element | id | Tile |
+|---|---|---|
+| `Wheat` (`Pick`) | 15506 | (3162, 3296) |
+| `Large door` | 1521 / 1524 | (3166, 3302) |
+| `Flour bin` (`Empty`) | 1781 | (3166, 3306) plane 0 |
+| `Ladder` | 12964 | (3164, 3307) → hopper floor plane 2 |
+
+`supply_cow_field_to_wheat_field` cost corrected `205.0 → 25.0` (they are ~20 tiles apart, not a
+trans-desert trek), and a new `supply_mill_to_hopper_floor` edge was added.
+
+### The six-step mill chain (with two real bugs found while validating it)
+1. `Large door (1521)` — **Open**, gated on `consumes=(Grain, Pot)` so the bot can never strand itself
+   upstairs without ingredients;
+2. `Ladder (12964)` — **Climb-up** to plane 2;
+3. `Hopper` — **Fill** (grain);
+4. `Hopper controls` — **Operate**;
+5. `Ladder` — **Climb-down** to plane 0;
+6. `Flour bin (1781)` — **Empty** (consumes `Pot 1931` → `Pot of flour 1933`).
+
+**Bug found:** without a latch, the *climb-down* re-armed the *climb-up* step → infinite stair
+ping-pong. Fixed with `_done` latch on arrival.
+
+### New verification (`110 passed`)
+| Test | Proves |
+|---|---|
+| `T98` | corrected coordinates; hopper-floor node exists on plane 2; cow→mill < 60 tiles |
+| `T99` | exact 6-step order, verified ids, and **exactly one** `Climb-up` (no ping-pong) |
+| `T100` | the `Pot` is procured before the bin is emptied |
+| `T101` | **regional sanity guard** — every supply node must sit inside its documented rectangle; nothing outside Al Kharid may fall into Al Kharid |
+| `T102` | end-to-end kernel run produces `Pot of flour (1933)` with zero escalation |
+
+`T101` is the antidote to this bug class: a transposed digit now fails the suite, not a live run.

@@ -132,8 +132,14 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "LUMBRIDGE_SPINNING_WHEEL": WorldPoint(3209, 3212, 1, "LUMBRIDGE_SPINNING_WHEEL"),  # plane 1
     "BARBARIAN_SPINNING_WHEEL": WorldPoint(3081, 3430, 0, "BARBARIAN_SPINNING_WHEEL"),  # plane-0 fallback
     "LUMBRIDGE_CASTLE_BASEMENT": WorldPoint(3216, 9625, 0, "LUMBRIDGE_CASTLE_BASEMENT"),  # bucket spawn
-    "MILL_LANE_WHEAT_FIELD": WorldPoint(3307, 3163, 0, "MILL_LANE_WHEAT_FIELD"),  # wheat pins 3303-3311
-    "MILL_LANE_MILL": WorldPoint(3307, 3174, 0, "MILL_LANE_MILL"),
+    # `PR-19.6` FIELD-CORRECTED (`acc_02` live probe). The old values (3307,3163) landed INSIDE the
+    # Al Kharid Palace throne room — the bot literally tried to pick wheat next to a `Throne (1108)`.
+    # Lumbridge windmill ground truth: wheat object `15506` "Pick" at (3162,3296); mill `Large door`
+    # `1521`/`1524` at (3166,3302); ground-floor `Flour bin` `1781` at (3166,3306); `Ladder` `12964`
+    # at (3164,3307) leading to the hopper floor.
+    "MILL_LANE_WHEAT_FIELD": WorldPoint(3162, 3296, 0, "MILL_LANE_WHEAT_FIELD"),
+    "MILL_LANE_MILL": WorldPoint(3166, 3302, 0, "MILL_LANE_MILL"),
+    "LUMBRIDGE_WINDMILL_TOP": WorldPoint(3164, 3307, 2, "LUMBRIDGE_WINDMILL_TOP"),
     "DRAYNOR_AGGIE": WorldPoint(3087, 3232, 0, "DRAYNOR_AGGIE"),
     "FALADOR_PARK": WorldPoint(3000, 3375, 0, "FALADOR_PARK"),
     "VARROCK_CADAVA_BUSHES": WorldPoint(3268, 3368, 0, "VARROCK_CADAVA_BUSHES"),  # pins 3264..3277
@@ -401,13 +407,19 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "edge_id": "supply_cow_field_to_wheat_field",
             "src": "LUMBRIDGE_COW_FIELD",
             "dst": "MILL_LANE_WHEAT_FIELD",
-            "cost_tiles": 205.0,
+            "cost_tiles": 25.0,  # `PR-19.6`: the two Lumbridge sites are ~20 tiles apart, not 205!
         },
         {
             "edge_id": "supply_wheat_field_to_mill",
             "src": "MILL_LANE_WHEAT_FIELD",
             "dst": "MILL_LANE_MILL",
             "cost_tiles": 12.0,
+        },
+        {
+            "edge_id": "supply_mill_to_hopper_floor",
+            "src": "MILL_LANE_MILL",
+            "dst": "LUMBRIDGE_WINDMILL_TOP",
+            "cost_tiles": 8.0,
         },
         {
             "edge_id": "supply_draynor_bank_to_aggie",
