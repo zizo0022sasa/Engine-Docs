@@ -31,6 +31,7 @@ class FakeGameAdapter:
         equipment_items: list[str] | None = None,
         ground_items: list[dict[str, Any]] | None = None,
         walk_speed_tiles_per_tick: int | None = None,
+        unwalkable_tiles: set[tuple[int, int]] | None = None,
         interaction_grants: Callable[[str, dict[str, Any], "FakeGameAdapter"], None] | None = None,
         combat_level: int | None = None,
         is_member: bool = False,
@@ -77,6 +78,11 @@ class FakeGameAdapter:
         # `None` = legacy instant teleport; an int = simulate a real client walk speed (PR-19.1).
         self.walk_speed_tiles_per_tick: int | None = walk_speed_tiles_per_tick
         self._walk_target: tuple[int, int, int] | None = None
+        # `PR-19.3`: tiles the collision map rejects. Mirrors the live client behaviour
+        # `[Walker] walk rejected: target has no walkable tile within threshold` — the command is
+        # REFUSED and the character does not move at all.
+        self.unwalkable_tiles: set[tuple[int, int]] = set(unwalkable_tiles or ())
+        self.walk_rejections: int = 0
         self.under_attack: bool = False
         self.transient_disconnect: bool = False
         self._pending_heal_on_tick: tuple[int, int] | None = None  # (target_tick, heal_amount)
@@ -385,6 +391,9 @@ class FakeGameAdapter:
             if self.walk_speed_tiles_per_tick is None:
                 self.position = {"x": tx, "y": ty, "plane": tplane}
             else:
+                if (tx, ty) in self.unwalkable_tiles:
+                    self.walk_rejections += 1
+                    return {"ok": False, "reason": "target-not-walkable"}
                 self._walk_target = (tx, ty, tplane)
                 self._step_towards_walk_target()
                 # Realistic RuneLite pathing: the character walks a few tiles per tick instead of
@@ -502,7 +511,12 @@ class FakeGameAdapter:
         cx, cy = int(cur["x"]), int(cur["y"])
         dx = max(-speed, min(speed, tx - cx))
         dy = max(-speed, min(speed, ty - cy))
-        self.position = {"x": cx + dx, "y": cy + dy, "plane": tplane if int(cur["plane"]) == tplane else int(cur["plane"])}
+        nx, ny = cx + dx, cy + dy
+        if (nx, ny) in self.unwalkable_tiles:
+            # A real client cannot step onto a blocked tile; it stops at the last walkable one.
+            self._walk_target = None
+            return
+        self.position = {"x": nx, "y": ny, "plane": tplane if int(cur["plane"]) == tplane else int(cur["plane"])}
         if cx + dx == tx and cy + dy == ty and int(self.position["plane"]) == tplane:
             self._walk_target = None
         self.run_energy = max(0, self.run_energy - 1) if self.run_enabled else min(100, self.run_energy + 1)

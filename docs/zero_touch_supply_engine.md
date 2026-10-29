@@ -198,3 +198,58 @@ directive layer was wrong.**
 `T33` (pre-existing) still passes byte-identically: the low-HP danger tick keeps the exact dispatch
 order `("CONSUME_FOOD", "SET_RUN_MODE", "WALK_TO_WORLD_POINT")` — the assist detects the toggle and
 stays silent instead of duplicating it.
+
+---
+
+## 11. `PR-19.3` — Collision map / non-walkable destination (field incident #3)
+
+### The evidence (verbatim, `client.log`, 2026-10-29 15:39:43 EEST)
+```
+[Walker] walk rejected: target WorldPoint(x=3172, y=3317, plane=0) has no walkable tile within 0
+    in the collision map (nearest walkable WorldPoint(x=3171, y=3316, plane=0)); check the destination
+[WalkerTelemetry] UNREACHABLE cause=target-not-walkable ... totalUnreachable=462
+```
+`LUMBRIDGE_COW_FIELD` pointed at the tile the **dairy cow entity** occupies. `Rs2Walker` refuses a
+destination with `threshold=0`, so **every** `/walk` was rejected and the bot stood still from tick
+~1230 until the progress guard (correctly) fired. The route was also forced through that node:
+`SHEEP_FARM -> COW_FIELD -> CHICKEN_COOP`.
+
+### Two-layer fix
+
+**Layer 1 — the specific, field-proven correction**
+* `LUMBRIDGE_COW_FIELD` → `(3171, 3316)` — the tile the client itself reported as walkable.
+* New direct spur `supply_sheep_farm_to_chicken_coop` (34.0) so the coop is reachable **without**
+  passing through the cow field at all.
+
+**Layer 2 — the systemic cure (matters more than the coordinate)**
+Any node may one day sit under an NPC/object. Edge blacklisting cannot fix that, because the problem
+is the **destination itself**. `NavigationEngine` now carries `FINAL_TARGET_SNAP_OFFSETS` — a
+deterministic 17-tile ring (origin tile → cardinals → diagonals → radius 2 → radius 3, every offset
+within the supply engine's 3-tile tolerance):
+
+* Fires only when the **final waypoint** is what we are commanding (the exact `walk rejected`
+  signature), only **on the surface** (`y < 5000`), and only after the **same 20-tick surface budget**
+  as the generic reroute — so no existing behaviour fires earlier (`T62` unchanged).
+* An independent `stationary_ticks` counter (never reset by the micro-route re-dispatch debounce)
+  makes sure the ring can actually reach its threshold, so micro-routes heal too.
+* Mid-route jams stay with the edge-blacklist machinery: the ring is never spent on a geometry
+  problem it cannot fix.
+
+### New verification (`94 passed`)
+
+| Test | Proves |
+|---|---|
+| `T83` | cow-field coordinate **is** the walker-verified `(3171, 3316)`; the new direct spur wins the route |
+| `T84` | ring starts at the origin tile, is duplicate-free, stays within 3 tiles, covers all 4 directions |
+| `T85` | replaying `walk rejected`: single-hop leg **and** micro-route both rotate to an accepted tile |
+| `T86` | full kernel replay from the exact field position with the cow tile **and** the coop tile blocked: the bot still collects the egg, zero escalation, `walk_rejections > 0` (proves the ring carried it) |
+
+`FakeGameAdapter` can now model the client faithfully: `unwalkable_tiles` refuses a walk exactly like
+`Rs2Walker` (command rejected, character does not move, `walk_rejections` counted).
+
+### Honest limits
+* The snap ring explores ±3 tiles; a destination blocked by an object larger than 7×7 will exhaust the
+  ring and the engine escalates with the precise `SUPPLY_AREA_UNREACHABLE:<node>` reason.
+* Coordinates for the 5 unverified nodes (Aggie, Wyson, redberries, Goblin crates, mill) are still
+  approximate; if one of them lands on an object, the ring will now recover it automatically instead of
+  halting the session.

@@ -58,6 +58,18 @@ class NavigationPlan:
     total_cost_tiles: float
 
 
+# Deterministic ring tried when `Rs2Walker` refuses the FINAL tile as non-walkable
+# ("target-not-walkable", threshold=0). Ordered: same tile, cardinals, diagonals, radius 2, radius 3 —
+# every offset stays within the supply engine's `walk_tolerance` of 3 tiles.
+FINAL_TARGET_SNAP_OFFSETS: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (1, 0), (-1, 0), (0, 1), (0, -1),
+    (1, 1), (-1, -1), (1, -1), (-1, 1),
+    (2, 0), (-2, 0), (0, 2), (0, -2),
+    (3, 0), (-3, 0), (0, 3), (0, -3),
+)
+
+
 @dataclass
 class NavigationProgress:
     plan: NavigationPlan
@@ -66,6 +78,9 @@ class NavigationProgress:
     last_dispatched_index: int = -1
     last_observed_pos: WorldPoint | None = None
     stalled_ticks_on_segment: int = 0
+    stationary_ticks: int = 0
+    route_start_pos: WorldPoint | None = None
+    final_snap_index: int = 0
     completed: bool = False
 
 
@@ -107,7 +122,10 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "GOBLIN_VILLAGE": WorldPoint(2958, 3512, 0, "GOBLIN_VILLAGE"),
     # --- PR-19 ZERO-TOUCH SUPPLY SOURCES (coordinates from OSRS Wiki map data pins) ---
     "FRED_ONION_GARDEN": WorldPoint(3189, 3267, 0, "FRED_ONION_GARDEN"),      # onion spawns 3188-3191/3266-3268
-    "LUMBRIDGE_COW_FIELD": WorldPoint(3172, 3317, 0, "LUMBRIDGE_COW_FIELD"),  # dairy cow x:3172 y:3317
+    # `PR-19.3`: the dairy cow ENTITY occupies (3172,3317) in the collision map, so `Rs2Walker` refused
+    # every walk to it ("target-not-walkable ... nearest walkable (3171,3316)" — live client.log
+    # 2026-10-29 15:39:43). We now target the verified WALKABLE tile next to the cow and interact by name.
+    "LUMBRIDGE_COW_FIELD": WorldPoint(3171, 3316, 0, "LUMBRIDGE_COW_FIELD"),
     "LUMBRIDGE_CHICKEN_COOP": WorldPoint(3175, 3303, 0, "LUMBRIDGE_CHICKEN_COOP"),  # egg spawns 3169..3185
     "LUMBRIDGE_CASTLE_NORTH_STAIRS": WorldPoint(3205, 3227, 0, "LUMBRIDGE_CASTLE_NORTH_STAIRS"),
     "LUMBRIDGE_SPINNING_WHEEL": WorldPoint(3209, 3212, 1, "LUMBRIDGE_SPINNING_WHEEL"),  # plane 1
@@ -349,6 +367,12 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "cost_tiles": 15.0,
         },
         {
+            "edge_id": "supply_sheep_farm_to_chicken_coop",
+            "src": "LUMBRIDGE_SHEEP_FARM",
+            "dst": "LUMBRIDGE_CHICKEN_COOP",
+            "cost_tiles": 34.0,
+        },
+        {
             "edge_id": "supply_courtyard_to_castle_north_stairs",
             "src": "LUMBRIDGE_CASTLE_COURTYARD",
             "dst": "LUMBRIDGE_CASTLE_NORTH_STAIRS",
@@ -571,11 +595,15 @@ class NavigationEngine:
         lookahead_tiles: int = 4,
         max_stalled_ticks_before_reroute: int = 20,
         walk_redispatch_cooldown_ticks: int = 5,
+        final_target_snap_after_stalled_ticks: int = 6,
     ) -> None:
         self.graph = graph or ConstrainedWaypointGraph()
         self.lookahead_tiles = lookahead_tiles
         self.max_stalled_ticks_before_reroute = max(2, int(max_stalled_ticks_before_reroute))
         self.walk_redispatch_cooldown_ticks = max(3, int(walk_redispatch_cooldown_ticks))
+        # `PR-19.3`: retained for introspection; the effective gate is the surface stall budget
+        # (`max_stalled_ticks_before_reroute`) measured by the independent `stationary_ticks` counter.
+        self.final_target_snap_after_stalled_ticks = max(2, int(final_target_snap_after_stalled_ticks))
         self._blacklisted_edges_by_account: dict[str, set[str]] = {}
         self._active_progress: dict[str, NavigationProgress] = {}
 
@@ -617,6 +645,7 @@ class NavigationEngine:
                     plan=plan,
                     target_signature=sig,
                     current_index=1,
+                    route_start_pos=origin,
                 )
                 return plan
 
@@ -633,6 +662,7 @@ class NavigationEngine:
             plan=plan,
             target_signature=sig,
             current_index=start_idx,
+            route_start_pos=origin if isinstance(origin, WorldPoint) else self.nodes.get(str(origin)),
         )
         return plan
 
@@ -685,9 +715,33 @@ class NavigationEngine:
                 prog.stalled_ticks_on_segment += 1
             else:
                 prog.stalled_ticks_on_segment = 0
+            # `PR-19.3`: independent counter (never reset by the generic re-dispatch debounce) so the
+            # destination snap ring can actually reach its threshold on micro-routes too.
+            prog.stationary_ticks = prog.stationary_ticks + 1 if stationary else 0
         prog.last_observed_pos = current_pos
 
         force_redispatch = False
+        on_final_waypoint = prog.current_index >= len(prog.plan.waypoints) - 1
+        # Only rotate the DESTINATION tile when the FINAL waypoint is what we are actually commanding —
+        # that is the exact field signature (`walk rejected: target ... not walkable`). Mid-route jams
+        # are geometry problems and stay with the edge-blacklist/reroute machinery below, so the snap
+        # ring is never spent on something it cannot fix. Micro-routes have len==2, so they qualify too.
+        # Surface only (underground keeps its 5-tick recovery contract untouched), and gated on the SAME
+        # 20-tick surface budget as the generic reroute so no existing behaviour fires earlier.
+        if (
+            current_pos.y < 5000
+            and on_final_waypoint
+            and prog.stationary_ticks >= self.max_stalled_ticks_before_reroute
+        ):
+            # `PR-19.3` SYSTEMIC FIX: the client refuses a destination whose tile is not walkable in the
+            # collision map ("target-not-walkable", live `Rs2Walker` telemetry on the dairy cow tile).
+            # Edge blacklisting cannot help here — the problem is the DESTINATION itself — so rotate
+            # through a deterministic ring of nearby tiles until the walker accepts one.
+            if prog.final_snap_index < len(FINAL_TARGET_SNAP_OFFSETS) - 1:
+                prog.final_snap_index += 1
+                prog.stalled_ticks_on_segment = 0
+                force_redispatch = True
+
         effective_cooldown = (
             min(3, self.walk_redispatch_cooldown_ticks)
             if current_pos.y >= 5000
@@ -729,9 +783,12 @@ class NavigationEngine:
 
         if prog.last_dispatched_index != prog.current_index or force_redispatch:
             prog.last_dispatched_index = prog.current_index
+            ox, oy = (0, 0)
+            if on_final_waypoint and prog.final_snap_index:
+                ox, oy = FINAL_TARGET_SNAP_OFFSETS[prog.final_snap_index]
             return {
-                "x": target_wp.x,
-                "y": target_wp.y,
+                "x": target_wp.x + ox,
+                "y": target_wp.y + oy,
                 "plane": target_wp.plane,
                 "wait": False,
                 **prog.plan.walker_flags,
