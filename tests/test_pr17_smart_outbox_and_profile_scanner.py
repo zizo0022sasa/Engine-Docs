@@ -873,3 +873,50 @@ def test_t63_select_an_option_live_ground_truth_and_permanent_village_fire() -> 
     assert f4_dir.payload == {"option": "Talk to any banker."}
 
 
+def test_t64_floor4_vestibule_2_of_4_max_dist_1_anti_oscillation() -> None:
+    """T64 (`PR-17.3`): Proves that inside Floor 4 vestibule `(2359, 5232)`, `StrongholdTaskModule`
+    emits `NAVIGATE_TO (2360, 5234)` (`max_dist=1`) instead of clicking `Portal of Death` from `y=5232`
+    (where Microbot `nearestOnClientThread()` would click the southern portal at `2359, 5232`), and
+    only emits `INTERACT_OBJECT` once standing at `chebyshev_distance <= 1` (`(2360, 5234)`).
+    """
+    from osrs_ee.bots.base import DirectiveType, TickContext
+    from osrs_ee.bots.stronghold_module import StrongholdTaskModule
+    from osrs_ee.navigation.waypoint_graph import WorldPoint
+
+    bot = StrongholdTaskModule(min_required_food=1)
+    caps = AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3)
+
+    # At (2359, 5232), dist to (2360, 5234) is 2 > max_dist=1 -> MUST walk north first!
+    ctx_south_entry = TickContext(
+        game_tick=180,
+        position=WorldPoint(2359, 5232, 0),
+        capabilities=caps,
+        inventory_items=({"id": 2142, "name": "Cooked meat", "quantity": 1},),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    d_walk = bot.evaluate_tick(ctx_south_entry)
+    assert d_walk.directive_type == DirectiveType.NAVIGATE_TO
+    assert isinstance(d_walk.destination, WorldPoint)
+    assert (d_walk.destination.x, d_walk.destination.y) == (2360, 5234)
+
+    # Once standing at (2360, 5234) (dist=0 <= 1; 1 tile from north portal 2360,5235 vs 2 from south 2359,5232) -> Pass-through!
+    ctx_north_door = TickContext(
+        game_tick=182,
+        position=WorldPoint(2360, 5234, 0),
+        capabilities=caps,
+        inventory_items=({"id": 2142, "name": "Cooked meat", "quantity": 1},),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    d_pass = bot.evaluate_tick(ctx_north_door)
+    assert d_pass.directive_type == DirectiveType.INTERACT_OBJECT
+    assert d_pass.payload == {
+        "name": "Portal of Death",
+        "action": "Pass-through",
+        "target_x": 2360,
+        "target_y": 5234,
+    }
+
+
+

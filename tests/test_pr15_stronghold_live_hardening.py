@@ -527,17 +527,17 @@ def test_t49_null_gametick_monotonic_progression_stall_recovery_and_ankou_eat_th
         adapter.hp_max = 10
         adapter.under_attack = True
 
-        r_eat1 = kernel.step_tick(bot, now_monotonic=10.0)
+        r_eat1 = kernel.step_tick(bot, now_monotonic=22.0)
         assert "CONSUME_FOOD" in r_eat1.dispatched_commands, "Must eat at 8/10 HP underground (Ankou max hit = 8)!"
 
         # Simulate Ankou hitting -6 on the exact same tick Trout heals, leaving HP at 6/10 (< 8)!
         # Food count dropped (8 -> 7), so Watchdog confirms eat #1 and fires eat #2 after 3 synthetic ticks!
-        adapter. _pending_heal_amount = 0
+        adapter._pending_heal_on_tick = None
         adapter.hp_current = 6
 
-        kernel.step_tick(bot, now_monotonic=11.0)  # +1 tick (cooldown)
-        kernel.step_tick(bot, now_monotonic=12.0)  # +2 ticks (cooldown)
-        r_eat2 = kernel.step_tick(bot, now_monotonic=13.0)  # +3 ticks -> cooldown satisfied with game_tick=None!
+        kernel.step_tick(bot, now_monotonic=23.0)  # +1 tick (cooldown)
+        kernel.step_tick(bot, now_monotonic=24.0)  # +2 ticks (cooldown)
+        r_eat2 = kernel.step_tick(bot, now_monotonic=25.0)  # +3 ticks -> cooldown satisfied with game_tick=None!
         assert "CONSUME_FOOD" in r_eat2.dispatched_commands, "Second food was blocked when game_tick is None!"
         assert r_eat2.halted is False
     finally:
