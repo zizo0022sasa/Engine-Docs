@@ -9,8 +9,8 @@ Field-Verified OSRS Mechanics & Coordinates (`run_stronghold_bot.py` + `Strongho
      `GRAND_EXCHANGE`) and withdraws up to `target_food_count` (default `10`) food items.
   3. Zero-Touch Fallback: if the bank holds `< min_required_food` food (e.g., fresh post-Tutorial account),
      autonomously nets Shrimps at `LUMBRIDGE_SWAMP_FISHING` (claiming a free `Small fishing net` `303` from
-     `Fishing tutor` if needed) and cooks them on the open-air permanent `Fire` at `BARBARIAN_RIVER_FIRE`
-     (`(3106, 3432, 0)`, `270:14`, zero quest/door lock) right outside `BARBARIAN_VILLAGE`.
+     `Fishing tutor` if needed) and cooks them on the permanent Barbarian Village `Fire` at `BARBARIAN_RIVER_FIRE`
+     (`(3078, 3445, 0)`, `270:14`, zero quest/door lock) right beside `BARBARIAN_VILLAGE`.
 - Surface Anchor: `GRAND_EXCHANGE` `(3164, 3487, 0)` <-> Entrance `BARBARIAN_VILLAGE` `(3081, 3421, 0)` (`id=20790`).
 - Streamlined `chebyshev_distance <= 2` Dungeon Object & Portal Passage (`PR-15` Req #4):
   1. Floor 1 (*Vault of War*, `1855..1935, 5180..5250`, `Varbit 2309`):
@@ -473,15 +473,15 @@ class StrongholdTaskModule(TaskModule):
         elif (edible_qty + raw_qty) >= desired_batch or free_slots == 0:
             self._staging_cook_phase = True
 
-        # Subphase 2A: Cook raw Shrimps on open-air Barbarian River permanent Fire (id=26185, zero quest/door lock)
+        # Subphase 2A: Cook raw Shrimps on permanent Barbarian Village Fire (id=26185, zero quest/door lock)
         if self._staging_cook_phase and raw_qty > 0:
-            fire_wp = WorldPoint(3106, 3432, 0, "BARBARIAN_RIVER_FIRE")
+            fire_wp = WorldPoint(3078, 3445, 0, "BARBARIAN_RIVER_FIRE")
             if ctx.position.chebyshev_distance(fire_wp) > 2:
                 self._awaiting_cook_widget = False
                 return TaskDirective(
                     directive_type=DirectiveType.NAVIGATE_TO,
                     destination="BARBARIAN_RIVER_FIRE",
-                    reason=f"Routing with {raw_qty} raw fish to open-air Barbarian River Fire (3106, 3432)",
+                    reason=f"Routing with {raw_qty} raw fish to Barbarian Village permanent Fire (3078, 3445)",
                 )
 
             if raw_qty < self._last_raw_fish_qty:
@@ -522,7 +522,7 @@ class StrongholdTaskModule(TaskModule):
             self._last_gather_action_tick = ctx.game_tick
             return TaskDirective(
                 directive_type=DirectiveType.INTERACT_OBJECT,
-                payload={"name": "Fire", "action": "Cook", "target_x": 3106, "target_y": 3432},
+                payload={"name": "Fire", "action": "Cook", "target_x": 3078, "target_y": 3445},
                 reason=f"Interacting with permanent Fire to cook {raw_qty} raw Shrimps",
             )
 

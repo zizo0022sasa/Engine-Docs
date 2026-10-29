@@ -313,7 +313,7 @@ def test_t48_preflight_lumbridge_draynor_bank_staging_and_zero_bank_shrimp_fallb
        `(3092, 3245, 0)`, withdraws `10x Trout`, closes bank, and ONLY THEN walks to `BARBARIAN_VILLAGE`.
     2. When BOTH inventory and Draynor Bank hold `0` food, bot autonomously walks to `LUMBRIDGE_SWAMP_FISHING`,
        claims free `Small fishing net` (`303`) from `Fishing tutor`, nets `Raw shrimps`, cooks them on the
-       open-air `BARBARIAN_RIVER_FIRE` `(3106, 3432, 0)` (`270:14`), and enters `BARBARIAN_VILLAGE` (`20790`).
+       permanent Barbarian Village `BARBARIAN_RIVER_FIRE` `(3078, 3445, 0)` (`270:14`), and enters `BARBARIAN_VILLAGE` (`20790`).
     """
     # --- Part A: Live HTTP BankHandler (`id` without `item_id`/`noted`) at Draynor Bank ---
     bank_state = {
@@ -840,7 +840,7 @@ def test_t51_barbarian_bridge_walk_debounce_fire_cooking_levelup_resume_and_dire
         destination="BARBARIAN_VILLAGE",
         capabilities=caps,
     )
-    assert [(wp.x, wp.y) for wp in plan_fire_to_hole.waypoints] == [(3106, 3432), (3081, 3421)]
+    assert [(wp.x, wp.y) for wp in plan_fire_to_hole.waypoints] == [(3078, 3445), (3081, 3421)]
 
     # 2. Full end-to-end rehearsal starting from exact Live Run 3 bridge position (3105, 3420) with 11x Raw shrimps
     store, adapter, _gate, kernel = _make_leased_fake_env(
@@ -869,7 +869,7 @@ def test_t51_barbarian_bridge_walk_debounce_fire_cooking_levelup_resume_and_dire
             if cmd_type == "WALK_TO_WORLD_POINT":
                 tx, ty = int(payload["x"]), int(payload["y"])
                 walk_targets.append((tx, ty))
-                if (tx, ty) == (3106, 3432):
+                if (tx, ty) == (3078, 3445):
                     # Simulate real WebWalker taking 3 stationary ticks to compute bridge path 1..19 before moving!
                     bridge_walk_started_tick = tick_counter
                     return {"ok": True}
@@ -890,7 +890,7 @@ def test_t51_barbarian_bridge_walk_debounce_fire_cooking_levelup_resume_and_dire
             tick_counter = step
             # After 3 stationary ticks on the bridge, WebWalker moves player smoothly to the Fire!
             if bridge_walk_started_tick is not None and (step - bridge_walk_started_tick) == 3:
-                adapter.position = {"x": 3106, "y": 3432, "plane": 0}
+                adapter.position = {"x": 3078, "y": 3445, "plane": 0}
                 bridge_walk_started_tick = None
 
             # Simulate real gradual OSRS cooking (2-3 shrimps per cycle) + Cooking Level 1->2 interruption!
@@ -919,8 +919,8 @@ def test_t51_barbarian_bridge_walk_debounce_fire_cooking_levelup_resume_and_dire
                 break
 
         assert entered_stronghold_20790 is True, "Bot did not finish cooking and enter Stronghold 20790!"
-        # Must dispatch ONLY ONE `/walk` to (3106, 3432) and ONE direct `/walk` to (3081, 3421)!
-        assert walk_targets == [(3106, 3432), (3081, 3421)], f"Unexpected walk calls: {walk_targets}"
+        # Must dispatch ONLY ONE `/walk` to (3078, 3445) and ONE direct `/walk` to (3081, 3421)!
+        assert walk_targets == [(3078, 3445), (3081, 3421)], f"Unexpected walk calls: {walk_targets}"
         assert StrongholdTaskModule._count_raw_swamp_fish(tuple(adapter.inventory_items)) == 0
         assert StrongholdTaskModule._count_edible_food(tuple(adapter.inventory_items)) >= 10
     finally:

@@ -736,7 +736,7 @@ def test_t61_attach_bot_loads_scanned_profile_capabilities_and_records_smart_out
 
 
 def test_t62_surface_20_tick_vs_underground_5_tick_stall_reroute_budget() -> None:
-    """T62 (`PR-17.1`): Proves surface graph edges `(3080, 3421) -> BARBARIAN_RIVER_FIRE (3106, 3432)`
+    """T62 (`PR-17.1` / `PR-17.2`): Proves surface graph edges `(3080, 3421) -> BARBARIAN_RIVER_FIRE (3078, 3445)`
     allow 20 ticks (`12.0s`) for natural multi-tile WebWalker travel without premature edge blacklisting,
     while underground dungeon steps (`y >= 5000`) preserve fast `<= 5`-tick recovery.
     """
@@ -747,7 +747,7 @@ def test_t62_surface_20_tick_vs_underground_5_tick_stall_reroute_budget() -> Non
     nav = NavigationEngine(graph)
     caps = AccountCapabilitiesContext("acc_02", skills={"agility": 1, "hitpoints": 10}, combat_level=3)
 
-    # 1. Surface walk from Barbarian Village (3080, 3421) -> BARBARIAN_RIVER_FIRE (3106, 3432)
+    # 1. Surface walk from Barbarian Village (3080, 3421) -> BARBARIAN_RIVER_FIRE (3078, 3445)
     p_village = WorldPoint(3080, 3421, 0)
     cmd_1 = nav.step_navigation_on_tick(
         current_pos=p_village,
@@ -755,7 +755,7 @@ def test_t62_surface_20_tick_vs_underground_5_tick_stall_reroute_budget() -> Non
         capabilities=caps,
         destination="BARBARIAN_RIVER_FIRE",
     )
-    assert cmd_1 is not None and (cmd_1["x"], cmd_1["y"]) == (3106, 3432)
+    assert cmd_1 is not None and (cmd_1["x"], cmd_1["y"]) == (3078, 3445)
 
     # Across 19 ticks (11.4s), MUST NOT blacklist the direct edge or yank the player toward (3105, 3420)!
     for _ in range(19):
@@ -796,4 +796,80 @@ def test_t62_surface_20_tick_vs_underground_5_tick_stall_reroute_budget() -> Non
         destination=p_dungeon_goal,
     )
     assert d4 is not None
+
+
+def test_t63_select_an_option_live_ground_truth_and_permanent_village_fire() -> None:
+    """T63 (`PR-17.2`): Verifies:
+    1. Live Floor 4 `Portal of Death` ground-truth payload (`"question": "Select an option"`,
+       `["Talk to any banker.", "Use the account management section on the website."]`) resolves
+       deterministically via Tier 1B `SH_KNOWN_ANSWER_MATCH`.
+    2. All unique verified answers in `LOCAL_SECURITY_CACHE` resolve under `"Select an option"`,
+       `_GENERIC_SAFE_FALLBACKS` covers `"two-factor"`, `"authenticator"`, and `"banker"`, and
+       unrecognized/ambiguous options still fail closed (`matched is False`).
+    3. `StrongholdTaskModule` at Floor 4 `(2359, 5231)` emits `SELECT_DIALOGUE` (`"Talk to any banker."`)
+       and `BARBARIAN_RIVER_FIRE` resolves to `(3078, 3445, 0)` across graph & module.
+    """
+    from osrs_ee.ai.dialogue_solver import LOCAL_SECURITY_CACHE, DeterministicStrongholdSolver
+    from osrs_ee.bots.base import DirectiveType, TickContext
+    from osrs_ee.bots.stronghold_module import StrongholdTaskModule
+    from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
+
+    solver = DeterministicStrongholdSolver()
+
+    # 1. Exact live JSON payload captured on Port 8081 at Floor 4 Portal of Death
+    live_res = solver.solve(
+        "Select an option",
+        [
+            "Talk to any banker.",
+            "Use the account management section on the website.",
+        ],
+    )
+    assert live_res.matched is True
+    assert live_res.option_index == 0
+    assert live_res.selected_option == "Talk to any banker."
+    assert live_res.rule_id == "SH_KNOWN_ANSWER_MATCH"
+
+    # 2. Every unique answer in LOCAL_SECURITY_CACHE resolves cleanly under "Select an option"
+    for ans in set(LOCAL_SECURITY_CACHE.values()):
+        r = solver.solve("Select an option", ["Click the suspicious phishing link immediately.", ans])
+        assert r.matched is True
+        assert r.option_index == 1
+        assert r.selected_option == ans
+        assert r.rule_id == "SH_KNOWN_ANSWER_MATCH"
+
+    # 3. Expanded _GENERIC_SAFE_FALLBACKS covers two-factor / authenticator / banker variants
+    fb_2fa = solver.solve(
+        "Select an option",
+        ["Give password to clan leader.", "Enable two-factor protection right away."],
+    )
+    assert fb_2fa.matched is True and fb_2fa.option_index == 1 and fb_2fa.rule_id == "SH_GENERIC_SAFE"
+
+    # Fail-closed invariant preserved when options are completely unknown
+    unknown_res = solver.solve("Select an option", ["Option Alpha", "Option Beta"])
+    assert unknown_res.matched is False
+
+    # 4. StrongholdTaskModule at Floor 4 (2359, 5231) answers Portal of Death and routes Fire to (3078, 3445)
+    assert (DEFAULT_WORLD_NODES["BARBARIAN_RIVER_FIRE"].x, DEFAULT_WORLD_NODES["BARBARIAN_RIVER_FIRE"].y) == (
+        3078,
+        3445,
+    )
+    bot = StrongholdTaskModule(min_required_food=1)
+    f4_ctx = TickContext(
+        game_tick=104,
+        position=WorldPoint(2359, 5231, 0),
+        capabilities=AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3),
+        inventory_items=({"id": 2142, "name": "Cooked meat", "quantity": 1},),
+        dialogue_open=True,
+        dialogue_question="Select an option",
+        dialogue_options=(
+            "Talk to any banker.",
+            "Use the account management section on the website.",
+        ),
+        varbits={2309: 1, 2310: 1, 2311: 1, 2312: 0},
+        total_level=35,
+    )
+    f4_dir = bot.evaluate_tick(f4_ctx)
+    assert f4_dir.directive_type == DirectiveType.SELECT_DIALOGUE
+    assert f4_dir.payload == {"option": "Talk to any banker."}
+
 

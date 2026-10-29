@@ -122,6 +122,9 @@ _GENERIC_SAFE_FALLBACKS: tuple[str, ...] = (
     "report the player",
     "politely decline",
     "use the authenticator",
+    "two-factor",
+    "authenticator",
+    "banker",
     "nobody",
 )
 
@@ -142,7 +145,7 @@ class DeterministicStrongholdSolver:
         if not indexed_valid:
             return DialogueResolution(False, None, None, "EMPTY_OR_WAIT_PROMPT")
 
-        # Tier 1: Exact normalized match against field-verified 39-entry Stronghold cache
+        # Tier 1A: Match question fragment if present
         expected_norm = {
             _normalize_dialogue_text(ans)
             for q_frag, ans in LOCAL_SECURITY_CACHE.items()
@@ -155,6 +158,16 @@ class DeterministicStrongholdSolver:
             if len(exact_hits) == 1:
                 hit_idx, hit_opt = exact_hits[0]
                 return DialogueResolution(True, hit_idx, hit_opt, "SH_EXACT_CACHE")
+
+        # Tier 1B: If question is generic ("select an option"), match options directly against known verified answers!
+        if not expected_norm:
+            known_answers = {_normalize_dialogue_text(ans) for ans in LOCAL_SECURITY_CACHE.values()}
+            exact_hits = [
+                (idx, opt) for idx, opt in indexed_valid if _normalize_dialogue_text(opt) in known_answers
+            ]
+            if len(exact_hits) == 1:
+                hit_idx, hit_opt = exact_hits[0]
+                return DialogueResolution(True, hit_idx, hit_opt, "SH_KNOWN_ANSWER_MATCH")
 
         # Tier 2: Canonical 12-Principle keyword match
         q_low = q_raw.lower()
