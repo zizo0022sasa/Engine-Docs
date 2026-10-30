@@ -473,19 +473,20 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             )
 
         # 2. Quest 1: Cook's Assistant (1 QP)
+        # `PR-20.5`: same defect class as incident #10 — `== 0` meant a started-but-unfinished quest
+        # (`Varp 29 == 1`) walked to the Cook with an empty bag. Gate on "not finished".
         if cook_state < 2:
-            if cook_state == 0:
-                prep = self._ensure_supplies_at_anchor(
-                    ctx,
-                    [
-                        {"item_id": 1944, "name": "Egg", "quantity": 1},
-                        {"item_id": 1927, "name": "Bucket of milk", "quantity": 1},
-                        {"item_id": 1933, "name": "Pot of flour", "quantity": 1},
-                    ],
-                    "Cook's Assistant",
-                )
-                if prep is not None:
-                    return prep
+            prep = self._ensure_supplies_at_anchor(
+                ctx,
+                [
+                    {"item_id": 1944, "name": "Egg", "quantity": 1},
+                    {"item_id": 1927, "name": "Bucket of milk", "quantity": 1},
+                    {"item_id": 1933, "name": "Pot of flour", "quantity": 1},
+                ],
+                "Cook's Assistant",
+            )
+            if prep is not None:
+                return prep
             return self._walk_and_talk(
                 ctx.position,
                 "LUMBRIDGE_KITCHEN",
@@ -564,7 +565,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             )
 
         # 5. Quest 4: Goblin Diplomacy (5 QP, Varp 62 < 6)
-        if goblin_state == 0:
+        # `PR-20.5` FIELD FIX (incident #10, live `Varp 62 = 1`): the gate said `== 0`, so the moment
+        # the quest was ACCEPTED (state 1) the whole supply prep was skipped and the engine sent the
+        # bot 250 tiles to General Bentnoze empty-handed — through the Dark Wizard corridor at 2 HP.
+        # The gate must be "not finished yet", never "not started yet".
+        if goblin_state < 6:
             prep = self._prepare_goblin_diplomacy_supplies(ctx)
             if prep is not None:
                 return prep

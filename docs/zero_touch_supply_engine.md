@@ -889,3 +889,84 @@ The two live-proven suspects are now behind us (Aggie, Wyson's dialogue is next)
 2. **Wyson** — wanders Falador Park; the node `(3000,3375)` is a single tile in a large park
    (pen geometry). Also his live dialogue has not been captured yet.
 3. **Generals' dialogue** — wiki transcripts, not live text.
+
+---
+
+## 20. `PR-20.5` — The gate that meant "not started" instead of "not finished" (field incident #10)
+
+### 20.1 What happened on the live account
+
+Immediately after `PR-20.4` was pulled, the seventy-tick probe produced this:
+
+```text
+[tick=0001] dir=NAVIGATE_TO | Goblin Diplomacy (QP=8): routing safely to General Bentnoze
+[tick=0070] state=IN_DANGER | Goblin Diplomacy (QP=8): routing safely to General Bentnoze
+```
+
+`GET /varps?id=62` → **`1`**: the quest had been accepted. A level-3 account with an empty bag
+(only `Red dye` + 55 GP) was walking 250 tiles toward the Goblin Village, took a wizard's hit at the
+Draynor crossroad (`HP 10 → 2`) and was rescued by the field operator into Draynor bank.
+
+### 20.2 The root cause — a one-character semantic error
+
+```python
+# before (quests_module.py)
+if goblin_state == 0:                                   # only while NOT started
+    prep = self._prepare_goblin_diplomacy_supplies(ctx)
+    if prep is not None:
+        return prep
+return self._walk_and_talk(..., "General Bentnoze", ...)
+```
+
+Varp `62` moves `0 → 1` the instant the quest is accepted. In state `1` the guard was **false**, so
+the entire supply chain — onions → dyes → combines → crates → three mails — was skipped and the very
+next directive was the hand-in walk.
+
+This is not a routing bug, a coordinate bug, or a client bug. It is the *cheapest* kind of bug we can
+have and the most expensive kind to miss: **the gate described "not started" while the intent was
+"not finished".**
+
+### 20.3 The same class existed on Cook's Assistant
+
+```python
+if cook_state < 2:
+    if cook_state == 0:          # identical defect: Varp 29 == 1 skipped procurement
+```
+
+A started-but-unfinished Cook's Assistant (`Varp 29 == 1`) would have walked to the Cook empty-handed
+in exactly the same way. Both gates now read "not finished" (`< 6` / `< 2`), and the redundant nested
+`if` was flattened.
+
+### 20.4 The structural guard (the part that matters)
+
+Fixing one `==` is worthless if the next quest repeats it. `T141` sweeps **every** quest across
+**every** live intermediate varp value with an empty bag and an empty bank, and asserts that the
+engine never interacts with a turn-in NPC:
+
+| quest | varp | states swept |
+|---|---|---|
+| Cook's Assistant | `29` | `0, 1` |
+| Sheep Shearer | `179` | `0, 1, 2, 10, 20` |
+| Romeo & Juliet | `144` | `0, 20, 30, 40` |
+| Goblin Diplomacy | `62` | `0, 1, 2, 3, 4, 5` |
+
+Any future quest added to the bundle should be added to this table; the failure message names the
+NPC and quotes the directive, so the diagnosis is immediate.
+
+### 20.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T140` | the exact live case: `Varp 62 = 1`, empty bag → supply work, never the general; with all three mails held the general is correctly targeted again |
+| `T141` | the structural sweep (14 quest-state combinations × 2 economy conditions) |
+| `T142` | `Varp 29 = 1` procures egg + milk + flour before visiting the Cook |
+
+Full suite: **`150 passed`** (`T01..T142`), `0 failed`.
+
+### 20.6 Operational note recorded with this release
+
+The bot was rescued at **2 HP with no food**. `ReactiveSafetyWatchdog` behaved exactly as designed
+(`EMERGENCY_NO_FOOD_FLEE` on the surface keeps it running instead of freezing inside an aggressor's
+range, `PR-19.5`), and natural regeneration inside the bank brings it back to 10/10 — but the mission
+should not resume at 2 HP. Wait for full HP (or stage food with `--require-food-count`) before the next
+`attach-bot` run. The engine cannot out-heal a level-20 wizard; it can only out-run one.
