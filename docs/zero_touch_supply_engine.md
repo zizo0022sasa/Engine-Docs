@@ -1587,3 +1587,71 @@ here so it is a **decision**, not an oversight. If a run ever dies carrying more
 
 `acc_01` is the acceptance run because `AD-1` predicts it finishes with `[funding=ZERO_TOUCH]` on **0 GP
 of external money**. That single completion validates `AD-1` end to end.
+
+---
+
+## 29. Live log 2026-10-30 (8081) — first clean run, and the route audit that preceded it
+
+### 29.1 What the engine did, and why it is exactly right
+
+```
+[tick=0001] state=IN_GAME | dir=WAIT_NEXT_TICK | Zero-Touch supply: bank audited live (1 usable stacks)
+[tick=0002] state=IN_GAME | dir=NAVIGATE_TO   | Zero-Touch supply: walking to LUMBRIDGE_CHICKEN_COOP for Egg
+```
+
+Tick 1 audits the vault, tick 2 goes and gets the egg in the world. That is `AD-1.3` behaving as
+designed: **a 0 GP account is never asked for money** — the egg, the milk and the flour cost nothing, so
+the only thing that can happen is a gather.
+
+### 29.2 The route audit (run before committing 250 ticks to it)
+
+`ConstrainedWaypointGraph.plan_safe_route` from `VARROCK_WEST_BANK`, capabilities = combat 3 / HP 10:
+
+| destination | waypoints | tiles | hazard nodes on path |
+|---|---|---|---|
+| `LUMBRIDGE_CHICKEN_COOP` | 7 | 413 | none |
+| `LUMBRIDGE_KITCHEN` | 6 | 333 | none |
+| `LUMBRIDGE_SHEEP_FARM` | 6 | 379 | none |
+| `VARROCK_REDBERRY_BUSHES` | 5 | 238 | none |
+| `DRAYNOR_AGGIE` | 6 | 247 | none |
+| `FALADOR_PARK` | 7 | 243 | none |
+| `GOBLIN_VILLAGE` | 7 | 369 | none |
+| `VARROCK_CADAVA_BUSHES` | 4 | 230 | none |
+| `LUMBRIDGE_WINDMILL_TOP` | 10 | 470 | none |
+
+Every quest node is reachable, and the router prunes **4** edges consistently on all of them — the
+dark-wizard corridor among them. `LUMBRIDGE_CHICKEN_COOP (3175,3303,0)` is a real graph node with edges
+(a phantom node would have raised `NoSafeRouteError`), so tick 2's walk was legitimate, not a guess.
+
+### 29.3 The account on 8081 is NOT the account `acc_02`'s row describes
+
+| | ledger row (`state.db`) | live character (operator, 2026-10-30) |
+|---|---|---|
+| name | `acc_02` (recorded as `zaza266`) | **`ZizoScouttt`** |
+| QP | `10` | **1** |
+| stage | `STAGE_3_F2P_SKILLING` | fresh — `Varp 29/179/144/62` all `0` |
+| GP | — | **0** |
+
+So the row is describing a character that is no longer on the port. Nothing breaks — the QP latch is
+baseline-relative, so a stale high QP cannot fabricate a completion — but the **ledger is lying about
+who is being driven**, which is the same class of error as the retired "10,000 GP" line.
+
+→ **`scan-profile --port 8081 --account-id acc_02` before the long run.** Ten seconds, and the ledger and
+the port agree again.
+
+### 29.4 The upside nobody planned
+
+A **1 QP / 0 GP character with all four quest varps at zero** is *exactly* the acceptance scenario of
+`AD-1`. If this run completes, its `COMPLETE_TASK` will print `[funding=ZERO_TOUCH]` — and the acceptance
+artifact is produced on 8081, not 8082. The plan does not need to change; it needs to be **recognised**.
+
+### 29.5 Tick budget
+
+`--max-ticks 250` under-budgets the bundle by roughly an order of magnitude: the first leg alone is a
+413-tile walk. A tick ceiling is a **stop**, not a target — when it expires mid-chain the bot halts with
+a persisted `Varp`/inventory state, which a re-attach resumes cleanly, but it wastes the run. Use a
+ceiling that comfortably covers the whole bundle and let it finish early:
+
+```
+--max-ticks 12000
+```
