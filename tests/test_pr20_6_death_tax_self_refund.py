@@ -148,12 +148,11 @@ def test_t146_an_account_with_no_coins_anywhere_never_ping_pongs_to_the_bank() -
     bot = _bot(bank_stock={})  # empty bank: nothing to withdraw
     directive = bot._ensure_coin_float(_ctx(AGGIE_DOOR, coins=1))
     assert directive is not None
-    # Never a bank trek with an empty vault — the bot funds itself where it stands.
+    # Never a BANK trek with an empty vault — the bot goes earning instead (`PR-20.7`/`PR-20.8`).
     assert directive.directive_type != DirectiveType.BANK_TURNAROUND, directive
-    assert directive.directive_type != DirectiveType.NAVIGATE_TO, directive
-    assert directive.directive_type == DirectiveType.INTERACT_NPC, directive
-    assert directive.payload["action"] == "Pickpocket"
+    assert directive.directive_type != DirectiveType.ESCALATE_HUMAN, directive
     assert bot._coin_float_unavailable is False, "earning is a real option, not an immediate surrender"
+    assert bot._coin_earning is True
 
     # The blocker is still reported honestly once earning is genuinely exhausted (T149).
     bot._coin_earn_attempts = TradeUnlockQuestsTaskModule.COIN_EARN_ATTEMPT_CAP

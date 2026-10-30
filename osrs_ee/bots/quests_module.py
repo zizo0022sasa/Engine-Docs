@@ -111,6 +111,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # `PR-20.7`: in-world coin EARNING (pickpocketing) once every bank is proven empty.
         self._coin_earning = False
         self._coin_earn_attempts = 0
+        # `PR-20.8`: where the bot is currently earning, its best purse seen, and its strike count —
+        # a rejected pickpocket looks exactly like an unlucky one unless the purse is watched.
+        self._coin_earn_node: str | None = None
+        self._coin_best_gp = -1  # -1 = "no baseline observed yet" (0 is a legitimate purse)
+        self._coin_no_progress = 0
         # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
         # run*, never on QP the account already carried from earlier stages.
         self._baseline_quest_points: int | None = None
@@ -320,6 +325,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             # behaviour — give up and let the dye step escalate — left an entirely able account
             # blocked for want of 30 GP. The bot now EARNS the money the way a player would.
             self._coin_earning = True
+            self._coin_earn_node = None
+            self._coin_best_gp = held
+            self._coin_no_progress = 0
             return self._earn_coins(ctx)
         return directive
 
@@ -330,21 +338,64 @@ class TradeUnlockQuestsTaskModule(TaskModule):
     # `Talk-to` (Aggie / Wyson / Fred) and `Shear` (Sheep, 20 wool). A name-based action on a proven
     # endpoint — not a widget guess, not a shop interface.
     COIN_EARN_ATTEMPT_CAP = 80
+    # `PR-20.8` FIELD FIX (incident #13): `PR-20.7` assumed Draynor village was full of citizens. The
+    # live `GET /npcs?maxDistance=30` census says otherwise — Draynor holds Bankers, Bank guard, Wise
+    # Old Man, Miss Schism, Ned, Aggie, Dianto/Fortunato and NOT ONE `Man`/`Woman`, so every attempt
+    # came back `{"success": false, "reason": "NPC not found"}`. The Lumbridge castle courtyard is the
+    # field-confirmed citizen hub (level-2 `Man`/`Woman`, zero risk for a level-3 account), and it is
+    # already a graph node with edges to the kitchen, the sheep farm and the north stairs.
+    COIN_EARN_NODES: tuple[str, ...] = ("LUMBRIDGE_CASTLE_COURTYARD", "VARROCK_SQUARE")
     PICKPOCKET_TARGETS: tuple[str, ...] = ("Man", "Woman")
-    # The bot funds itself where it already IS: the Draynor village centre is field-verified
-    # (`DRAYNOR_BANK 3092,3245`) and full of citizens, while the dark wizards sit south of the wall
-    # outside this radius — so earning never walks into the corridor that killed the account.
-    COIN_EARN_NODE = "DRAYNOR_BANK"
-    COIN_EARN_RADIUS = 14
+    COIN_EARN_RADIUS = 12
+    # `PR-20.8` — the deeper defect: a REJECTED pickpocket and an unlucky one look identical to the
+    # engine, so `PR-20.7` happily burned all 80 attempts against an NPC that was never there and
+    # would have escalated after ~80 silent ticks. Six fruitless attempts is enough to prove the
+    # target is wrong, not unlucky.
+    COIN_EARN_NO_PROGRESS_LIMIT = 6
+
+    def _nearest_earn_node(self, ctx: TickContext) -> str:
+        """Closest field-confirmed citizen hub (`PR-20.8`) — the bot earns where it already is."""
+        best, best_distance = self.COIN_EARN_NODES[0], float("inf")
+        for node_id in self.COIN_EARN_NODES:
+            node = DEFAULT_WORLD_NODES.get(node_id)
+            if node is None or node.plane != ctx.position.plane:
+                continue
+            distance = float(ctx.position.chebyshev_distance(node))
+            if distance < best_distance:
+                best, best_distance = node_id, distance
+        return best
+
+    def _next_earn_node(self, current: str) -> str | None:
+        """Advance to the next candidate hub, or `None` when they are all exhausted list."""
+        try:
+            index = self.COIN_EARN_NODES.index(current)
+        except ValueError:
+            return None
+        nxt = index + 1
+        return self.COIN_EARN_NODES[nxt] if nxt < len(self.COIN_EARN_NODES) else None
 
     def _earn_coins(self, ctx: TickContext) -> TaskDirective | None:
-        """Earn the missing dye budget in-world (`PR-20.7`), one pickpocket tick at a time."""
+        """Earn the missing dye budget in-world (`PR-20.7`), one pickpocket tick at a time.
+
+        `PR-20.8` adds the two things the live run proved missing: an honest location (Lumbridge
+        courtyard, not citizenship-free Draynor) and, more importantly, **progress awareness** — a
+        rejected interaction must not be mistaken for bad luck.
+        """
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
             self._coin_earning = False
             self._coin_float_resolved = True
             self._coin_earn_attempts = 0
+            self._coin_no_progress = 0
+            self._coin_best_gp = -1
             return None
+        # Progress watch: ANY new GP resets the strike count, silence is evidence. The FIRST
+        # observation only establishes the baseline — adopting it must not wipe strikes already earned.
+        if self._coin_best_gp < 0:
+            self._coin_best_gp = held
+        elif held > self._coin_best_gp:
+            self._coin_best_gp = held
+            self._coin_no_progress = 0
         if self._coin_earn_attempts >= self.COIN_EARN_ATTEMPT_CAP:
             self._coin_float_unavailable = True
             self._coin_earning = False
@@ -352,7 +403,31 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 directive_type=DirectiveType.ESCALATE_HUMAN,
                 reason=f"SUPPLY_UNSOURCED:Coins:pickpocket_exhausted({self._coin_earn_attempts})",
             )
-        node = DEFAULT_WORLD_NODES.get(self.COIN_EARN_NODE)
+        node_id = self._coin_earn_node or self._nearest_earn_node(ctx)
+        if self._coin_no_progress >= self.COIN_EARN_NO_PROGRESS_LIMIT:
+            # Six silent interactions: the target set is wrong, not unlucky. Relocate ONCE, then
+            # report the exact hub instead of burning the rest of the budget in silence.
+            nxt = self._next_earn_node(node_id)
+            if nxt is None:
+                self._coin_float_unavailable = True
+                self._coin_earning = False
+                return TaskDirective(
+                    directive_type=DirectiveType.ESCALATE_HUMAN,
+                    reason=f"SUPPLY_UNSOURCED:Coins:no_progress({node_id})",
+                )
+            self._coin_no_progress = 0
+            self._coin_earn_node = nxt
+            self._coin_best_gp = held
+            return TaskDirective(
+                directive_type=DirectiveType.NAVIGATE_TO,
+                destination=nxt,
+                reason=(
+                    f"Zero-Touch earnings: no coins from {node_id} in "
+                    f"{self.COIN_EARN_NO_PROGRESS_LIMIT} attempts; relocating to {nxt}"
+                ),
+            )
+        self._coin_earn_node = node_id
+        node = DEFAULT_WORLD_NODES.get(node_id)
         if (
             node is not None
             and ctx.position.plane == 0
@@ -360,19 +435,20 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         ):
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
-                destination=self.COIN_EARN_NODE,
+                destination=node_id,
                 reason=(
-                    f"Zero-Touch earnings: walking to {self.COIN_EARN_NODE} to earn "
+                    f"Zero-Touch earnings: walking to {node_id} to earn "
                     f"{self.COIN_FLOAT_GP - held} GP more"
                 ),
             )
         target = self.PICKPOCKET_TARGETS[self._coin_earn_attempts % len(self.PICKPOCKET_TARGETS)]
         self._coin_earn_attempts += 1
+        self._coin_no_progress += 1
         return TaskDirective(
             directive_type=DirectiveType.INTERACT_NPC,
             payload={"name": target, "action": "Pickpocket"},
             reason=(
-                f"Zero-Touch earnings: pickpocketing {target} "
+                f"Zero-Touch earnings: pickpocketing {target} at {node_id} "
                 f"({held}/{self.COIN_FLOAT_GP} GP, attempt {self._coin_earn_attempts})"
             ),
         )

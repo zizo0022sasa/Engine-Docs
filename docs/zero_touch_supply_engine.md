@@ -1136,3 +1136,60 @@ never an engine regression:
 | `T151` | anti-false-positive: dyes already banked ⇒ zero pickpockets |
 
 Full suite: **`159 passed`** (`T01..T151`), `0 failed`.
+
+---
+
+## 23. `PR-20.8` — Incident #13: a rejected interaction is not an unlucky one
+
+### 23.1 The live log
+
+`PR-20.7` shipped and the bot did exactly what it was told:
+
+```
+[tick=0026] dir=INTERACT_NPC | Zero-Touch earnings: pickpocketing Man (0/35 GP, attempt 1)
+[tick=0027] dir=INTERACT_NPC | Zero-Touch earnings: pickpocketing Woman (0/35 GP, attempt 2)
+ ...
+[tick=0035] dir=INTERACT_NPC | Zero-Touch earnings: pickpocketing Man (0/35 GP, attempt 10)
+```
+
+`POST /npcs/interact {"name": "Man", "action": "Pickpocket"}` → `{"success": false, "reason": "NPC not found"}`.
+
+A live `GET /npcs?maxDistance=30` census settled it: Draynor holds `Banker`, `Bank guard`,
+`Wise Old Man`, `Miss Schism`, `Ned`, `Aggie`, `Diango`, `Fortunato` — **no `Man`, no `Woman`**.
+
+### 23.2 Two defects, and the second one is the dangerous one
+
+1. **Wrong location.** `PR-20.7` assumed a citizen-rich village because the bot happened to be parked
+   there. It never asked. Fix: `COIN_EARN_NODES = ("LUMBRIDGE_CASTLE_COURTYARD", "VARROCK_SQUARE")` —
+   the field-confirmed hub (level-2 citizens, zero risk at level 3), already a live graph node
+   `(3222,3218,0)` with edges to the kitchen, the sheep farm and the north stairs.
+
+2. **The engine was blind to the outcome.** `_earn_coins` incremented `_coin_earn_attempts` and fired
+   the next pickpocket *whether the last one worked or not*. A rejected interaction and an unlucky one
+   are **the same input** to a counter — so the bot would have spent all 80 attempts against an NPC
+   that was never there and only then escalated, after ~80 silent ticks. This is the same defect family
+   as incident #10: **the engine could not tell "finished" from "started", and here it cannot tell
+   "refused" from "unlucky".** Watch the *effect*, never assume the *action*.
+
+### 23.3 The fix: strike counting on the purse, not on the call
+
+```
+1 new GP        -> strikes = 0          (a slow-but-working hub is never abandoned — T155)
++6 silent tries -> relocate to the next hub
+last hub silent -> SUPPLY_UNSOURCED:Coins:no_progress(<node>)   (one line, not eighty)
+80 attempts     -> SUPPLY_UNSOURCED:Coins:pickpocket_exhausted(<n>)   (unchanged backstop)
+```
+
+Relocating does **not** consume the pickpocket budget, and the baseline purse is adopted once
+(`_coin_best_gp = -1` means "not observed yet") so establishing it never wipes strikes already earned.
+
+### 23.4 Verification
+
+| test | guarantee |
+|---|---|
+| `T152` | the hubs are the courtyard + Varrock square; Draynor is explicitly excluded; the walk is routable |
+| `T153` | six rejected pickpockets force a **relocation**, not a 7th attempt and not the 80-tick burn |
+| `T154` | the last silent hub ends in `no_progress(VARROCK_SQUARE)` and the bot disarms |
+| `T155` | one successful pickpocket clears five strikes (bad luck ≠ wrong target) |
+
+Full suite: **`163 passed`** (`T01..T155`), `0 failed`.
