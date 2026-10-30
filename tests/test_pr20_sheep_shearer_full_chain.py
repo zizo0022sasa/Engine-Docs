@@ -59,6 +59,7 @@ def test_t109_shears_to_twenty_balls_of_wool_is_fully_self_served() -> None:
     shears_taken = 0
     shears_actions = 0
     spins = 0
+    widgets = 0
 
     for tick in range(1, 400):
         pos = WorldPoint(WHEEL.x, WHEEL.y, 1) if plane == 1 else WorldPoint(FARM.x, FARM.y, plane)
@@ -83,20 +84,27 @@ def test_t109_shears_to_twenty_balls_of_wool_is_fully_self_served() -> None:
                 plane = 1 if action == "Climb-up" else 0
             elif name == "Spinning wheel":
                 assert plane == 1, "the Lumbridge spinning wheel is on plane 1"
-                for it in list(inventory):
-                    if int(it["item_id"]) == WOOL_ID and int(it["quantity"]) > 0:
-                        it["quantity"] -= 1
-                        if it["quantity"] <= 0:
-                            inventory.remove(it)
-                        break
-                inventory.append({"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": 1})
+                # `PR-20.2` LIVE TRUTH: `Spin` only OPENS the Make-X interface (group 270);
+                # it produces nothing by itself. The balls come from the widget click below.
                 spins += 1
+        elif directive.directive_type == DirectiveType.CLICK_WIDGET:
+            # Make-X "Ball of wool" (270:15) = make-all: the whole wool stack becomes balls.
+            assert directive.payload.get("groupId") == 270, directive.payload
+            assert directive.payload.get("childId") == 15, directive.payload
+            for it in list(inventory):
+                if int(it["item_id"]) == WOOL_ID:
+                    inventory.remove(it)
+                    inventory.append(
+                        {"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": int(it["quantity"])}
+                    )
+            widgets += 1
         elif directive.directive_type == DirectiveType.NAVIGATE_TO:
             pass
 
     assert shears_taken == 1, f"shears taken {shears_taken} times"
     assert shears_actions == 20, f"expected 20 shear actions, got {shears_actions}"
-    assert spins == 20, f"expected 20 spins, got {spins}"
+    assert spins == 1, f"the wheel is opened ONCE, not once per ball (got {spins})"
+    assert widgets >= 1, "the Make-X click is what actually spins the wool"
     assert sum(int(i["quantity"]) for i in inventory if int(i["item_id"]) == BALL_OF_WOOL_ID) == 20
     assert engine.ensure(_ctx(WorldPoint(FARM.x, FARM.y, 0), inventory, 999), BALL_OF_WOOL_ID, 20) is None
 
@@ -118,21 +126,20 @@ def _sheep_world(command_type: str, payload: dict[str, Any], adapter: FakeGameAd
                 adapter.inventory_items.clear()
                 adapter.varps[179] = 21
                 adapter.quest_points += 1
+    elif command_type == "WIDGET_CLICK":
+        # `PR-20.2`: Make-X 270:15 = ball of wool, make-all.
+        for it in list(adapter.inventory_items):
+            if int(it["item_id"]) == WOOL_ID:
+                adapter.inventory_items.remove(it)
+                adapter._add_to_inventory(
+                    {"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": int(it["quantity"]), "noted": False}
+                )
     elif command_type == "INTERACT_OBJECT":
         if name in ("Staircase", "Stairs", "Ladder"):
             cur = dict(adapter.position)
             cur["plane"] = 1 if action == "Climb-up" else 0
             adapter.position = cur
-        elif name == "Spinning wheel":
-            for it in list(adapter.inventory_items):
-                if int(it["item_id"]) == WOOL_ID and int(it["quantity"]) > 0:
-                    it["quantity"] -= 1
-                    if it["quantity"] <= 0:
-                        adapter.inventory_items.remove(it)
-                    adapter._add_to_inventory(
-                        {"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": 1, "noted": False}
-                    )
-                    break
+        # `PR-20.2`: `Spin` opens the Make-X interface only — production happens in WIDGET_CLICK.
 
 
 def test_t110_kernel_run_completes_sheep_shearer_and_hands_in_twenty_balls(tmp_path: Path) -> None:

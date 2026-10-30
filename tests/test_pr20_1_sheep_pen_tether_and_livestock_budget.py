@@ -39,6 +39,8 @@ from osrs_ee.bots.base import DirectiveType, TickContext
 from osrs_ee.bots.quests_module import TradeUnlockQuestsTaskModule
 from osrs_ee.bots.supply_procurement import (
     BALL_OF_WOOL_ID,
+    CADAVA_BERRIES_ID,
+    REDBERRY_ID,
     SHEARS_ID,
     SUPPLY_RECIPES,
     WOOL_ID,
@@ -199,21 +201,20 @@ def _wandering_sheep_world(command_type: str, payload: dict[str, Any], adapter: 
                 adapter.inventory_items.clear()
                 adapter.varps[179] = 21
                 adapter.quest_points += 1
+    elif command_type == "WIDGET_CLICK":
+        # `PR-20.2`: Make-X 270:15 = ball of wool, make-all.
+        for it in list(adapter.inventory_items):
+            if int(it["item_id"]) == WOOL_ID:
+                adapter.inventory_items.remove(it)
+                adapter._add_to_inventory(
+                    {"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": int(it["quantity"]), "noted": False}
+                )
     elif command_type == "INTERACT_OBJECT":
         if name in ("Staircase", "Stairs", "Ladder"):
             cur = dict(adapter.position)
             cur["plane"] = 1 if action == "Climb-up" else 0
             adapter.position = cur
-        elif name == "Spinning wheel":
-            for it in list(adapter.inventory_items):
-                if int(it["item_id"]) == WOOL_ID and int(it["quantity"]) > 0:
-                    it["quantity"] -= 1
-                    if it["quantity"] <= 0:
-                        adapter.inventory_items.remove(it)
-                    adapter._add_to_inventory(
-                        {"item_id": BALL_OF_WOOL_ID, "name": "Ball of wool", "quantity": 1, "noted": False}
-                    )
-                    break
+        # `PR-20.2`: `Spin` opens the Make-X interface only — production happens in WIDGET_CLICK.
 
 
 def test_t126_kernel_run_completes_sheep_shearer_against_moving_sheep(tmp_path: Path) -> None:
@@ -305,13 +306,31 @@ def test_t127_only_the_livestock_step_declares_a_work_site_radius_or_budget() ->
     widened: list[tuple[int, int, str]] = []
     for item_id, recipe in SUPPLY_RECIPES.items():
         for idx, step in enumerate(recipe.steps):
-            if step.area_radius is not None or step.max_attempts is not None:
+            if step.area_radius is not None:
                 widened.append((item_id, idx, recipe.label))
-    assert len(widened) == 1, widened
-    item_id, idx, _label = widened[0]
-    step = SUPPLY_RECIPES[item_id].steps[idx]
-    assert item_id == WOOL_ID and step.targets == ("Sheep",), (item_id, step.targets)
-    assert step.action == "Shear"
+    # `PR-20.2` widened exactly TWO more steps, both justified by geometry rather than by a new
+    # incident: the cadava cluster (far corner 9 tiles from its anchor) and the two redberry bushes.
+    # Anything else appearing here is unrequested scope creep and must fail.
+    allowed = {
+        (WOOL_ID, "Sheep", "Shear"),
+        (CADAVA_BERRIES_ID, "Cadava bush", "Pick"),
+        (REDBERRY_ID, "Redberry bush", "Pick from"),
+    }
+    found = {
+        (item_id, SUPPLY_RECIPES[item_id].steps[idx].targets[0], SUPPLY_RECIPES[item_id].steps[idx].action)
+        for item_id, idx, _label in widened
+    }
+    assert found == allowed, (found, allowed)
+    # Attempt budgets are a narrower tool than radii: only the wandering livestock (`Wool`) and the
+    # Make-X production click (`PR-20.2`, which needs ~60s of server-side production) may carry one.
+    budgeted = {
+        (item_id, idx)
+        for item_id, recipe in SUPPLY_RECIPES.items()
+        for idx, step in enumerate(recipe.steps)
+        if step.max_attempts is not None
+    }
+    assert budgeted <= {(WOOL_ID, 0), (BALL_OF_WOOL_ID, 2)}, budgeted
+    assert (WOOL_ID, 0) in budgeted
 
     # A default step is still gated at the global tolerance (proven with the wheat field).
     from osrs_ee.bots.supply_procurement import GRAIN_ID

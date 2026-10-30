@@ -173,7 +173,8 @@ def test_t78_upper_floor_supply_uses_climb_not_an_unreachable_walk() -> None:
     wheel = DEFAULT_WORLD_NODES["LUMBRIDGE_SPINNING_WHEEL"]
     d = fresh.ensure(_ctx(wheel, inventory=inv), BALL_OF_WOOL_ID, 20)
     assert d is not None and d.directive_type == DirectiveType.INTERACT_OBJECT
-    assert d.payload == {"name": "Spinning wheel", "action": "Spin"}
+    # `PR-20.2`: the wheel is now pinned to its LIVE-probed object id (14889), not name-matched.
+    assert d.payload == {"name": "Spinning wheel", "action": "Spin", "id": 14889}
 
 
 # ---------------------------------------------------------------------------

@@ -641,3 +641,107 @@ Full suite: **`135 passed`** (`T01..T127`), `0 failed`.
 3. **Goblin crates are positional in name only.** All three steps search `{"name": "Crate"}` and the
    client picks the *nearest* crate, which may already have been looted. Expect a repeat-search dead
    end on the 2nd/3rd mail.
+
+---
+
+## 17. `PR-20.2` — The Make-X interface & the live spinning-wheel truth (honest post-mortem)
+
+### 17.1 What the live run proved
+
+The `PR-20.1` field run finished **Sheep Shearer live** (`Varp 179 = 21`, QP `2 → 3`, Crafting `1 → 3`,
+total level `38 → 40`, 60 GP reward) and rolled straight into `Romeo & Juliet`. Two new ground-truth
+facts came back from the probe:
+
+| Element | Live value |
+|---|---|
+| `Spinning wheel` | object id **`14889`** at `(3209, 3212)` plane 1 |
+| Make-X production interface | `groupId 270`, `childId 15` = `Ball of wool` |
+| 20 wool → 20 balls | ≈ 36 s of server-side production (make-all) |
+
+### 17.2 The uncomfortable part (stated plainly)
+
+**`Spin` produces nothing.** It opens the Make-X interface; the balls only appear after clicking
+`270:15`. My code assumed the object interaction itself yielded all 20 balls — and in the live run
+**the field operator clicked that widget by hand**.
+
+So: the quest point is genuinely earned, but that leg was **not** Zero-Touch. `PR-20.2` removes the
+need for the human. Any future report of a "successful" run should be read with this question: *which
+directives did the engine actually emit, and which did a person emit?*
+
+### 17.3 The fix
+
+A new step kind, plus two declarative fields:
+
+```python
+class SupplyStepKind(StrEnum):
+    ...
+    WIDGET = "WIDGET"          # Make-X / production interface
+
+@dataclass(frozen=True)
+class SupplyStep:
+    ...
+    widget_group: int | None = None     # live: 270
+    widget_child: int | None = None     # live: 15
+    redispatch_hold: int | None = None  # min ticks between two dispatches of the SAME step
+```
+
+`WIDGET` emits `CLICK_WIDGET {groupId, childId, text}` — the kernel already routes that to
+`POST /widgets/click`. The ball-of-wool chain is now:
+
+```
+Climb-up (needs 20 wool in the bag)
+  -> INTERACT_OBJECT {name: Spinning wheel, action: Spin, id: 14889}   # opens Make-X
+  -> CLICK_WIDGET {groupId: 270, childId: 15, text: "Ball of wool"}    # make-all, produces 20
+```
+
+Three behaviours make this robust:
+
+* **`redispatch_hold = 8`** — make-all takes ~36 s server-side; the click is re-issued at most every
+  8 ticks instead of every tick.
+* **progress-aware budget** — each ball produced resets the attempt counter, so a 60-tick production
+  can never look like a stall (`max_attempts = 120`).
+* **self-heal** — after half the budget with no production the engine discards the "interface is
+  open" latch and re-issues `Spin`. A window closed by a death or a region hop is reopened instead of
+  dead-ending in front of a closed interface.
+
+Also pinned in this release: `SPINNING_WHEEL_OBJECT_ID = 14889`.
+
+### 17.4 Pre-empting incident #8 (arithmetic, not prophecy)
+
+`T127` (surgical scope) now allow-lists **exactly three** widened work sites, and the two new ones are
+justified by geometry alone — the same class as the sheep pen:
+
+| step | documented extent | anchor | worst corner | needed radius |
+|---|---|---|---|---|
+| `Cadava bush` | `(3264,3366)-(3277,3374)` | `(3268,3368)` | `(3277,3374)` → **9 tiles** | `10` |
+| `Redberry bush` | two separate wild bushes | `(3240,3358)` | — | `8` |
+
+With the global 3-tile tolerance both would have tethered the bot exactly like the pen, minutes into
+the `Romeo & Juliet` leg. `T133` asserts the documented rectangle corners are inside the radius **and**
+that a distant bot is still routed (the radius is a work site, not a licence to pick from anywhere).
+
+### 17.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T128` | the wheel is pinned to live id `14889` on `(3209,3212)` plane 1 |
+| `T129` | chain = `Climb-up` → `Spin (id 14889)` → `CLICK_WIDGET {270,15,"Ball of wool"}` |
+| `T130` | make-all: ≤ 12 clicks for 20 balls, no escalation, no spam |
+| `T131` | a closed interface is reopened (self-heal) instead of dead-ending |
+| `T132` | kernel run against a world that **refuses** to produce on `Spin` alone → `Varp 179 = 21` |
+| `T133` | cadava/redberry work sites bounded by their documented rectangles |
+
+Harness note: `FakeGameAdapter` now forwards `WIDGET_CLICK` to the world script — a production
+interface *applies an effect* on the server, so the hermetic world must see it like any interaction.
+
+Full suite: **`141 passed`** (`T01..T133`), `0 failed`.
+
+### 17.6 Next risks on the running leg (`Romeo & Juliet`)
+
+1. **Cadava bush object id is still name-matched** (`Cadava bush` / `Cadava berry bush` aliases exist).
+   Watch for `SUPPLY_STEP_STALLED:Cadava berries:OBJECT:Cadava bush` → probe `GET /objects?name=Cadava`.
+2. **Dark wizards** sit immediately west of the cadava cluster: an `under_attack` pulse plus no food
+   yields `EMERGENCY_NO_FOOD_FLEE` (surface behaviour, `PR-19.5`). Expected, not a bug — but the bot
+   will run rather than fight.
+3. **Apothecary dialogue**: the potion requires the berries to still be held; `T113` re-acquires them,
+   the live text still needs confirming.

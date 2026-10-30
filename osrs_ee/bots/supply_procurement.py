@@ -63,6 +63,7 @@ DAIRY_COW_OBJECT_ID = 8689
 WHEAT_OBJECT_ID = 15506        # live: `Wheat` action "Pick" at (3162,3296)
 MILL_DOOR_OBJECT_ID = 1521     # live: `Large door` (1521 / 1524) at (3166,3302)
 FLOUR_BIN_OBJECT_ID = 1781     # live: `Flour bin` at (3166,3306)
+SPINNING_WHEEL_OBJECT_ID = 14889  # live: `Spinning wheel` at (3209,3212) plane 1  # PR-20.2
 MILL_LADDER_OBJECT_ID = 12964  # live: `Ladder` at (3164,3307)  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
 POT_ID = 1931
 BUCKET_ID = 1925
@@ -100,6 +101,12 @@ class SupplyStepKind(StrEnum):
     NPC = "NPC"
     COMBINE = "COMBINE"
     CLIMB = "CLIMB"
+    # `PR-20.2` FIELD-PROVEN: some OSRS production actions open a **Make-X interface** instead of
+    # producing directly. Live evidence (acc_02, `PR-20.1` run): `Spin` on the Lumbridge wheel opened
+    # `groupId 270`, and the wool was only spun after clicking `childId 15` ("Ball of wool"). In that
+    # run the click was performed MANUALLY by the field operator — which breaks the Zero-Touch
+    # Invariant. This step kind makes the engine perform it itself.
+    WIDGET = "WIDGET"
     ENTER_UNDERGROUND = "ENTER_UNDERGROUND"
     EXIT_UNDERGROUND = "EXIT_UNDERGROUND"
 
@@ -142,6 +149,13 @@ class SupplyStep:
     # `PR-20.1` per-step attempt budget (`None` = engine default `MAX_STEP_ATTEMPTS`). Wandering
     # livestock genuinely needs more than 26 ticks between successful shearings.
     max_attempts: int | None = None
+    # `PR-20.2` `WIDGET` steps: the Make-X production interface coordinates (live: `270` / `15`) and
+    # the clickable label, used both for the wire payload and for text-based fallback.
+    widget_group: int | None = None
+    widget_child: int | None = None
+    # `PR-20.2` minimum ticks between two dispatches of the SAME step. A Make-X product needs ~60s
+    # of server-side production; re-clicking every tick would be pointless command spam.
+    redispatch_hold: int | None = None
     note: str = ""
 
 
@@ -390,13 +404,33 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 note="Lumbridge Castle north staircase -> 1st floor (spin wheel is NOT reachable on plane 0)",
             ),
             SupplyStep(
+                # `PR-20.2` LIVE-PROVEN: `Spin` does NOT produce the balls by itself — it opens the
+                # Make-X production interface (`groupId 270`). Targeting the object by name alone was
+                # never exercised live before this run.
                 kind=SupplyStepKind.OBJECT,
                 area=_at("LUMBRIDGE_SPINNING_WHEEL", plane=1),
                 targets=("Spinning wheel",),
                 action="Spin",
+                object_id=SPINNING_WHEEL_OBJECT_ID,
+                # Opening the interface is instantaneous; the next step needs no grace window.
+                settle_ticks=0,
+                note="Lumbridge Castle 1st floor spin wheel 14889 (3209,3212, plane 1) — opens Make-X",
+            ),
+            SupplyStep(
+                # The actual production click. Without this the bot stands in front of an open
+                # interface forever (the live `PR-20.1` run needed a HUMAN click here).
+                kind=SupplyStepKind.WIDGET,
+                targets=("Ball of wool",),
+                action="Make-X",
+                widget_group=270,
+                widget_child=15,
                 consumes=((WOOL_ID, 20),),
                 produces=((BALL_OF_WOOL_ID, 20),),
-                note="Lumbridge Castle 1st floor spin wheel (3209,3212, plane 1)",
+                # Make-all of 20 balls takes ~36s server-side; re-click only every 8 ticks and let the
+                # progress-aware budget reset on each produced ball.
+                redispatch_hold=8,
+                max_attempts=120,
+                note="Make-X interface 270:15 (Ball of wool) — make-all",
             ),
         ),
     ),
@@ -411,6 +445,10 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 targets=("Cadava bush", "Cadava berry bush", "Cadava bush (wild)"),
                 action="Pick",
                 produces=((CADAVA_BERRIES_ID, 1),),
+                # `PR-20.2` PRE-EMPTIVE (same class as incident #7): the cadava bushes are a CLUSTER
+                # spanning (3264,3366)-(3277,3374); the anchor sits inside it, so the far corner is
+                # 9 tiles away and the 3-tile gate would tether the bot exactly like the sheep pen.
+                area_radius=10,
                 note="cadava bushes (3264,3366)-(3277,3374), west of the East Varrock mine",
             ),
         ),
@@ -464,6 +502,9 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 targets=("Redberry bush",),
                 action="Pick from",
                 produces=((REDBERRY_ID, 3),),
+                # `PR-20.2` PRE-EMPTIVE: two separate wild bushes (not one) — the bot must be able to
+                # walk between them without being dragged back to a single anchor tile.
+                area_radius=8,
                 note="two wild redberry bushes south-east of Varrock, EAST of the dark wizard circle",
             ),
         ),
@@ -642,6 +683,8 @@ class ZeroTouchSupplyEngine:
     # `PR-20` action grace: key -> first game tick at which the FOLLOWING step may be dispatched.
     _settle_until: dict[tuple[int, int], int] = field(default_factory=dict)
     _settle_waits: dict[tuple[int, int], int] = field(default_factory=dict)
+    # `PR-20.2`: key -> first game tick at which the SAME step may be dispatched again.
+    _hold_until: dict[tuple[int, int], int] = field(default_factory=dict)
     # Ticks the client is left alone after an action so its walk/animation can finish.
     settle_ticks: int = 3
     # How long the engine re-issues a consuming action while waiting for the inventory to shrink.
@@ -890,6 +933,19 @@ class ZeroTouchSupplyEngine:
                     payload={"deposit_inventory": False, "withdraw": [], "close_when_done": True},
                     reason=f"Zero-Touch supply: closing bank before gathering {recipe.label}",
                 )
+            # `PR-20.2`: a step may ask to be left alone for a few ticks after it is dispatched
+            # (Make-X production runs server-side; re-clicking every tick is pointless spam).
+            hold_until = self._hold_until.get(key)
+            if hold_until is not None:
+                if ctx.game_tick < hold_until:
+                    return TaskDirective(
+                        directive_type=DirectiveType.WAIT_NEXT_TICK,
+                        reason=(
+                            f"Zero-Touch supply: letting the client finish {recipe.label} "
+                            f"({max(0, hold_until - ctx.game_tick)} tick(s) left)"
+                        ),
+                    )
+                self._hold_until.pop(key, None)
             directive = self._emit(ctx, recipe, idx, step)
             if directive.directive_type != DirectiveType.ESCALATE_HUMAN:
                 if step.uses_up and not step.produces:
@@ -910,6 +966,8 @@ class ZeroTouchSupplyEngine:
                     settle = self._settle_for(step)
                     if settle > 0:
                         self._settle_until[key] = ctx.game_tick + settle
+                if step.redispatch_hold is not None and step.redispatch_hold > 0:
+                    self._hold_until[key] = ctx.game_tick + int(step.redispatch_hold)
             return directive
         return self._escalate(f"SUPPLY_CHAIN_EXHAUSTED:{recipe.label}")
 
@@ -958,6 +1016,28 @@ class ZeroTouchSupplyEngine:
                 directive_type=DirectiveType.INTERACT_NPC,
                 payload={"name": self._pick_alias(recipe.item_id, idx, step), "action": step.action},
                 reason=f"Zero-Touch supply: {step.action} for {recipe.label} ({step.note})",
+            )
+
+        if step.kind == SupplyStepKind.WIDGET:
+            # `PR-20.2`: click the Make-X product. Coordinates are live-verified (`270`/`15`); the
+            # label is carried too so a client that exposes text-based clicking can use it, and so a
+            # future interface renumbering degrades into a readable failure instead of a silent one.
+            widget_payload: dict[str, Any] = {}
+            if step.widget_group is not None:
+                widget_payload["groupId"] = int(step.widget_group)
+            if step.widget_child is not None:
+                widget_payload["childId"] = int(step.widget_child)
+            if step.targets:
+                widget_payload["text"] = step.targets[0]
+            # Self-heal: if the interface was closed mid-production the click does nothing. After half
+            # the budget, forget the "interface is open" latch so the previous step re-opens it.
+            budget = self.max_step_attempts if step.max_attempts is None else int(step.max_attempts)
+            if attempts > budget // 2:
+                self._done.discard((recipe.item_id, idx - 1))
+            return TaskDirective(
+                directive_type=DirectiveType.CLICK_WIDGET,
+                payload=widget_payload,
+                reason=f"Zero-Touch supply: selecting {recipe.label} in the {step.action or 'Make-X'} interface ({step.note})",
             )
 
         if step.kind == SupplyStepKind.COMBINE:

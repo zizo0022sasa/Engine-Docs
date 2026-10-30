@@ -182,10 +182,7 @@ def _world(command_type: str, payload: dict[str, Any], adapter: FakeGameAdapter)
             if has(POT_ID):
                 take(POT_ID)
                 add(POT_OF_FLOUR_ID, "Pot of flour")
-        elif name == "Spinning wheel":
-            if has(WOOL_ID):
-                take(WOOL_ID)
-                add(BALL_OF_WOOL_ID, "Ball of wool")
+        # `PR-20.2`: `Spin` opens the Make-X interface only — production happens in WIDGET_CLICK.
         elif name in ("Cadava bush", "Cadava berry bush", "Cadava bush (wild)"):
             add(CADAVA_BERRIES_ID, "Cadava berries")
         elif name == "Redberry bush":
@@ -194,6 +191,14 @@ def _world(command_type: str, payload: dict[str, Any], adapter: FakeGameAdapter)
             add(ONION_ID, "Onion", 2)
         elif name == "Crate":
             add(GOBLIN_MAIL_ID, "Goblin mail")
+
+    elif command_type == "WIDGET_CLICK":
+        # `PR-20.2`: Make-X 270:15 = ball of wool, make-all (the whole stack in one click).
+        if int(payload.get("groupId", 0)) == 270 and int(payload.get("childId", 0)) == 15:
+            qty = sum(int(i["quantity"]) for i in adapter.inventory_items if int(i["item_id"]) == WOOL_ID)
+            if qty:
+                take(WOOL_ID, qty)
+                add(BALL_OF_WOOL_ID, "Ball of wool", qty)
 
     elif command_type == "USE_ITEM_ON_ITEM":
         src = int(payload["source_item_id"])

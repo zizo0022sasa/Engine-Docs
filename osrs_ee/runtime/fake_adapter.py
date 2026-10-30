@@ -498,6 +498,10 @@ class FakeGameAdapter:
             has_text = bool(payload.get("text"))
             if not (has_coords or has_text):
                 return {"ok": False, "clicked": False, "reason": "Provide groupId+childId or text"}
+            # `PR-20.2`: a production interface (Make-X `270:15`) APPLIES an effect on the server,
+            # so the hermetic world script must see the click exactly like `INTERACT_OBJECT`.
+            if self.interaction_grants is not None:
+                self.interaction_grants(command_type, dict(payload), self)
             return {"ok": True, "clicked": True}
 
         raise ValueError(f"Unsupported command_type on FakeGameAdapter: {command_type}")
