@@ -137,3 +137,84 @@ def test_t160_a_purse_beyond_the_working_float_is_banked_not_carried() -> None:
     # dye budget (35 GP) — not the whole Sheep Shearer reward (60 GP) and certainly not 10,000.
     assert TradeUnlockQuestsTaskModule.COIN_FLOAT_GP == 35
     assert TradeUnlockQuestsTaskModule.COIN_FLOAT_GP < 60
+
+
+# ---------------------------------------------------------------------------
+# `PR-21.1` — funding PROVENANCE. The operator may fund a damaged account;
+# the ledger may not quietly turn that into an engine achievement (T161..T163).
+# ---------------------------------------------------------------------------
+def test_t161_operator_funded_recovery_is_detected_and_tagged() -> None:
+    """T161 (`PR-21.1`): the engine declares an exact shortfall, the operator puts money in the bag,
+    and the next tick finds a whole purse with **no withdrawal directive of ours** in between. That is
+    `OPERATOR_FUNDED_RECOVERY` — recorded with the amount, carried into `COMPLETE_TASK`, never hidden."""
+    from osrs_ee.bots.quests_module import FundingProvenance
+
+    bot = TradeUnlockQuestsTaskModule(target_quest_points=12)
+    bot._bank_audit_done = True
+    bot._bank_stock = {}  # live `GET /bank`: six items, zero coins
+
+    # 1. no coins anywhere -> the exact shortfall is reported.
+    escalate = bot._ensure_coin_float(_ctx(1))
+    assert escalate is not None and escalate.directive_type == DirectiveType.ESCALATE_HUMAN
+    assert bot._coin_shortfall_gp == 34
+    assert bot.funding_provenance is FundingProvenance.UNKNOWN
+
+    # 2. the operator funds the account: 50 GP appears in the bag.
+    assert bot._ensure_coin_float(_ctx(50)) is None
+    assert bot.funding_provenance is FundingProvenance.OPERATOR_FUNDED_RECOVERY
+    assert bot._coin_float_provenance_gp == 50
+
+
+def test_t162_a_bank_withdrawal_is_the_zero_touch_path() -> None:
+    """T162 (`PR-21.1`): when the ENGINE fetches its own money, the run is `ZERO_TOUCH`. The tag is set
+    at the moment the withdrawal directive is issued, not guessed at report time."""
+    from osrs_ee.bots.quests_module import FundingProvenance
+
+    bot = TradeUnlockQuestsTaskModule(target_quest_points=12)
+    bot._bank_audit_done = True
+    bot._bank_stock = {COINS_ID: 10_000}
+
+    directive = bot._ensure_coin_float(_ctx(1, position=DRAYNOR, bank_open=True))
+    assert directive is not None and directive.directive_type == DirectiveType.BANK_TURNAROUND
+    assert bot.funding_provenance is FundingProvenance.ZERO_TOUCH
+
+
+def test_t163_a_purse_present_from_the_first_tick_is_never_claimed_as_zero_touch() -> None:
+    """T163 (`PR-21.1`): a purse already full on the first observation cannot be attributed. It is
+    `PREEXISTING_CARRY` — honest about what the engine did not watch happen."""
+    from osrs_ee.bots.quests_module import FundingProvenance
+
+    bot = TradeUnlockQuestsTaskModule(target_quest_points=12)
+    bot._bank_audit_done = True
+    bot._bank_stock = {}
+    assert bot._ensure_coin_float(_ctx(60)) is None
+    assert bot.funding_provenance is FundingProvenance.PREEXISTING_CARRY
+
+
+def test_t164_complete_task_carries_the_provenance_tag() -> None:
+    """T164 (`PR-21.1`): the completion report itself says who paid. A run funded by a human can never
+    be mistaken for a `LIVE_WIRE_VERIFIED` zero-touch completion by reading the directive alone."""
+    from osrs_ee.bots.quests_module import FundingProvenance
+
+    bot = TradeUnlockQuestsTaskModule(target_quest_points=12)
+    bot._bank_audit_done = True
+    bot._bank_stock = {}
+    bot._ensure_coin_float(_ctx(1))       # shortfall proven
+    bot._ensure_coin_float(_ctx(50))      # operator fills it
+    assert bot.funding_provenance is FundingProvenance.OPERATOR_FUNDED_RECOVERY
+
+    done = {29: 2, 179: 21, 144: 100, 62: 6}
+    ctx = TickContext(
+        game_tick=99,
+        position=DEFAULT_WORLD_NODES["GRAND_EXCHANGE"],
+        capabilities=AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3),
+        inventory_items=(),
+        varps=done,
+        quest_points=13,
+        total_level=40,
+    )
+    directive = bot.evaluate_tick(ctx)
+    assert directive.directive_type == DirectiveType.COMPLETE_TASK, directive
+    assert directive.payload["funding_provenance"] == "OPERATOR_FUNDED_RECOVERY"
+    assert directive.payload["funded_gp"] == 50
+    assert "funding=OPERATOR_FUNDED_RECOVERY" in directive.reason

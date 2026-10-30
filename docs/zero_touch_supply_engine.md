@@ -1361,3 +1361,78 @@ No tile, id or dialogue line will be committed from the wiki.
 
 Full suite: **`159 passed`**, `0 failed` (`T01..T146`, `T157..T160`; `T147..T156` retired with the
 members-only path).
+
+---
+
+## 26. `PR-21.1` — `OPERATOR_FUNDED_RECOVERY`: the operator's decision, made mechanical
+
+### 26.1 The decision, recorded
+
+The operator holds the authority and exercised it. `acc_02` is funded **by hand, once**, as
+compensation for a loss the engine caused:
+
+> **`OPERATOR_FUNDED_RECOVERY (50 GP — bug compensation for Incident #10)`**
+
+This is not a re-opening of the `Zero-Touch Invariant`. It is the invariant's own recovery clause: when
+the engine itself destroys value through a defect, the operator may restore the account to the state the
+defect stole — **once, labelled, and never counted as an engine achievement.**
+
+### 26.2 The numbers, verified (the scope case was correct)
+
+| claim | verified |
+|---|---|
+| Mining level 15 needs `2,411` XP from zero | OSRS Wiki, *Free-to-play Mining training* |
+| copper/tin ore = `17.5` XP each | same |
+| zero → 15 = **138** ores; with the account's existing `35` XP ≈ **136** ores | same |
+| iron ore is gated behind Mining **15** | same |
+
+So the Doric's Quest route is not "a few rocks": it is a **mining subsystem** (pickaxe acquisition,
+~136-gather loop with drops, Rimmington routing) that exists only to recover 30 GP. Correctly classified
+as out-of-scope for a 10-QP bundle. And note the circularity: Doric's Quest *rewards* 1,300 Mining XP —
+but it cannot be **started** without ore that needs the level that reward would grant.
+
+### 26.3 What `PR-21.1` adds: provenance, not permission
+
+The danger in an operator-funded run is not the 50 GP. It is that six months from now, someone reads
+`COMPLETE_TASK` and believes a level-3 account cleared 13 QP unaided. So the bundle now records
+**where the purse came from**, mechanically:
+
+```python
+class FundingProvenance(str, Enum):
+    UNKNOWN                    # nothing observed yet
+    ZERO_TOUCH                 # the engine issued its own BANK_TURNAROUND withdrawal
+    PREEXISTING_CARRY          # whole purse on first observation — attributed, never claimed
+    OPERATOR_FUNDED_RECOVERY   # a shortfall was PROVEN, then coins appeared with no directive of ours
+```
+
+`COMPLETE_TASK` carries it:
+
+```json
+{"funding_provenance": "OPERATOR_FUNDED_RECOVERY", "funded_gp": 50, "quest_points": 13}
+"Stage 1A Quest Bundle completed (QP=13) and anchored at GRAND_EXCHANGE [funding=OPERATOR_FUNDED_RECOVERY]"
+```
+
+Design note worth keeping: the "give up" latch (`_coin_float_unavailable`) is now checked **after** the
+purse. A latch that stops the engine re-asking must never stop it *seeing* — the first draft did exactly
+that and `T161` caught it.
+
+### 26.4 The acceptance split
+
+| account | status the engine will print | what it means |
+|---|---|---|
+| `acc_02` (this run) | `[funding=OPERATOR_FUNDED_RECOVERY]` | the quest work is real; the money was restored by the operator after a proven defect |
+| `acc_01` (next) | `[funding=ZERO_TOUCH]` required | the real acceptance: 0 GP start, Sheep Shearer's 60 GP, 13 QP, nobody touching anything |
+
+`Stage 1A` is only `LIVE_WIRE_VERIFIED` when the second row prints. The first row is
+`OPERATOR_FUNDED_RECOVERY` — accurate, documented, and not a pass.
+
+### 26.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T161` | shortfall proven + coin infusion with no directive ⇒ `OPERATOR_FUNDED_RECOVERY`, amount recorded |
+| `T162` | an engine-issued withdrawal ⇒ `ZERO_TOUCH` |
+| `T163` | a purse full on first sight ⇒ `PREEXISTING_CARRY`, never claimed |
+| `T164` | `COMPLETE_TASK` payload and reason both carry the tag |
+
+Full suite: **`163 passed`**, `0 failed` (`T01..T146`, `T157..T164`).

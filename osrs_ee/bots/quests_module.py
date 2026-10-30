@@ -22,6 +22,7 @@ Option selection is strictly text-verified (never 1-based numeric index guessing
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TaskModule, TickContext
@@ -93,6 +94,26 @@ def _inv_count(items: tuple[Mapping[str, Any], ...], *, item_id: int, noted: boo
     )
 
 
+class FundingProvenance(str, Enum):
+    """Where the bot's dye budget actually came from (`PR-21.1`).
+
+    The operator has the authority to fund a damaged account — but the LEDGER must not quietly
+    upgrade that into an engine achievement. This enum makes the distinction mechanical: the bundle
+    records it, and `COMPLETE_TASK` carries it in its payload, so a completion report can never
+    accidentally claim `ZERO_TOUCH` for a run that a human paid for.
+    """
+
+    UNKNOWN = "UNKNOWN"
+    # The engine itself produced the money: a `BANK_TURNAROUND` withdrawal it issued on its own.
+    ZERO_TOUCH = "ZERO_TOUCH"
+    # The purse was already whole the first time the bundle looked at it (Fred's 60 GP arriving
+    # mid-run looks like this too on a resumed session) — attributed honestly, never claimed.
+    PREEXISTING_CARRY = "PREEXISTING_CARRY"
+    # The engine declared an exact shortfall, and coins then appeared with NO withdrawal directive
+    # from the engine: the money came from outside. Tagged, never hidden.
+    OPERATOR_FUNDED_RECOVERY = "OPERATOR_FUNDED_RECOVERY"
+
+
 class TradeUnlockQuestsTaskModule(TaskModule):
     """Pure tick-driven 12-QP non-combat quest chain (`stage1a_f2p_quests_10qp`)."""
 
@@ -111,11 +132,19 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # `PR-21`: how many GP were actually missing when the account ran dry — carried into the
         # escalation string so the next field report is self-explanatory.
         self._coin_shortfall_gp = 0
+        # `PR-21.1`: where the purse came from. Recorded, never inferred at report time.
+        self._coin_float_provenance = FundingProvenance.UNKNOWN
+        self._coin_float_provenance_gp = 0
         # `PR-20.7`: in-world coin EARNING (pickpocketing) once every bank is proven empty.
         # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
         # run*, never on QP the account already carried from earlier stages.
         self._baseline_quest_points: int | None = None
         self._descend_attempts = 0
+
+    @property
+    def funding_provenance(self) -> FundingProvenance:
+        """How this run's dye budget was obtained (`PR-21.1`). Read-only for reports."""
+        return self._coin_float_provenance
 
     @property
     def module_id(self) -> str:
@@ -314,12 +343,24 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # (`_coin_float_resolved = True`), then died to a Highwayman and kept 1 GP of its 55 — and the
         # engine never topped up again because the flag said "already handled". The purse is re-derived
         # from the live inventory every tick (the same stateless rule as the supply engine itself).
-        if self._coin_float_unavailable:
-            return None
+        # The purse is checked BEFORE the "give up" latch (`PR-21.1`). Order matters: the latch exists
+        # to stop re-asking, not to blind the engine. A shortfall followed by an operator top-up must
+        # still be SEEN and tagged, or the ledger would report a recovery as an unattributed run.
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
+            if self._coin_float_provenance is FundingProvenance.UNKNOWN:
+                # `PR-21.1`: a purse that arrives after the engine PROVED it was missing, with no
+                # withdrawal directive of ours in between, came from outside the engine. Record it.
+                if self._coin_shortfall_gp > 0:
+                    self._coin_float_provenance = FundingProvenance.OPERATOR_FUNDED_RECOVERY
+                    self._coin_float_provenance_gp = int(held)
+                else:
+                    self._coin_float_provenance = FundingProvenance.PREEXISTING_CARRY
             self._coin_float_resolved = True
             self._coin_shortfall_gp = 0
+            self._coin_float_unavailable = False
+            return None
+        if self._coin_float_unavailable:
             return None
         self._coin_float_resolved = False
         # Only top up what is actually missing (a bot that already earned Fred's 60 GP needs nothing).
@@ -379,6 +420,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         if audit is not None:
             return audit
         if self._bank_stock.get(item_id, 0) >= quantity:
+            if item_id == COINS_ID and self._coin_float_provenance is FundingProvenance.UNKNOWN:
+                # `PR-21.1`: the engine is about to fetch its own money — that is the zero-touch path.
+                self._coin_float_provenance = FundingProvenance.ZERO_TOUCH
             if not ctx.bank_is_open:
                 return self._goto_anchor_bank(
                     ctx,
@@ -601,7 +645,15 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 )
             return TaskDirective(
                 directive_type=DirectiveType.COMPLETE_TASK,
-                reason=f"Stage 1A Quest Bundle completed (QP={ctx.quest_points}) and anchored at {self.anchor_bank_node}",
+                payload={
+                    "funding_provenance": self._coin_float_provenance.value,
+                    "funded_gp": self._coin_float_provenance_gp,
+                    "quest_points": int(ctx.quest_points),
+                },
+                reason=(
+                    f"Stage 1A Quest Bundle completed (QP={ctx.quest_points}) and anchored at "
+                    f"{self.anchor_bank_node} [funding={self._coin_float_provenance.value}]"
+                ),
             )
 
         # 2. Quest 1: Cook's Assistant (1 QP)
