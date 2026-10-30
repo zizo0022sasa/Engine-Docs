@@ -542,3 +542,102 @@ bank:
 | `T121` | Zero-Touch audit: the only bank withdrawal is the bot's own coins |
 
 Full suite: **`129 passed`** (`T01..T121`), `0 failed`.
+
+---
+
+## 16. `PR-20.1` — Sheep-pen tether ping-pong & livestock budget (field incident #7)
+
+### 16.1 The incident (live tick 431)
+
+`PR-20` delivered **Cook's Assistant live** (`Varp 29 = 2`, QP `1 → 2`, Cooking `1 → 4`, total level
+`35 → 38`) and then transitioned on its own into `Sheep Shearer`: took `Shears (1735)`, sheared, and
+had **`1 Wool (1737)`** in the bag — then halted:
+
+```text
+[tick=0330] INTERACT_NPC      | Zero-Touch supply: Shear for Wool
+[tick=0335] state=IN_DANGER   | Zero-Touch supply: walking to LUMBRIDGE_SHEEP_FARM for Wool
+[tick=0370] NAVIGATE_TO       | Zero-Touch supply: walking to LUMBRIDGE_SHEEP_FARM for Wool
+[tick=0420] NAVIGATE_TO       | Zero-Touch supply: walking to LUMBRIDGE_SHEEP_FARM for Wool
+[tick=0431] ESCALATE_HUMAN    | SUPPLY_STEP_STALLED:Wool:NPC:Sheep
+```
+
+### 16.2 Root cause: the pen is an AREA, the engine treated it as a TILE
+
+`LUMBRIDGE_SHEEP_FARM` is a single node `(3190, 3273)` at the corner of Fred's ~20×20 pen, and
+`_at_area()` demanded `chebyshev_distance <= walk_tolerance (3)`. Reproduced hermetically before the
+fix — a sheep 6 tiles into the pen was already "outside":
+
+| bot position | distance to anchor | pre-fix directive | post-fix directive |
+|---|---|---|---|
+| (3190, 3273) | 0 | `INTERACT_NPC Sheep` | `INTERACT_NPC Sheep` |
+| (3196, 3274) | 6 | **`NAVIGATE_TO` (dragged back)** | `INTERACT_NPC Sheep` |
+| (3204, 3264) | 14 | **`NAVIGATE_TO`** | `INTERACT_NPC Sheep` |
+| (3209, 3280) | 19 | **`NAVIGATE_TO`** | `INTERACT_NPC Sheep` |
+
+So the loop was: `Shear` → the client walks toward the sheep → out of the 3-tile radius → the engine
+marches the bot back to the corner tile → `Shear` → … Every failed shear burned an attempt, and
+`MAX_STEP_ATTEMPTS (26)` ran out on a pen that was simply bigger than the tolerance.
+
+> Note: the `IN_DANGER` line at tick 335 is incidental (a `Ram` in the pen puts `under_attack=True`,
+> which only raises the eat threshold to 8 and sets `enable_run`). It did **not** replace the task
+> directive — `preserve_movement=True` by design (`PR-19.5`).
+
+### 16.3 The fix: the work site is declarative
+
+```python
+@dataclass(frozen=True)
+class SupplyStep:
+    ...
+    area_radius: int | None = None     # the WORK SITE is a radius around the node
+    max_attempts: int | None = None    # explicit budget for wandering livestock
+```
+
+`_at_area()` uses `step.area_radius` when present, else the global `walk_tolerance`; `_emit()` uses
+`step.max_attempts` when present, else `max_step_attempts`. Routing is untouched: outside the radius
+the engine still issues `NAVIGATE_TO`.
+
+The sheep step now declares:
+
+```python
+area_radius=22,    # chebyshev(anchor (3190,3273) -> far pen corner (3212,3258)) = 22
+max_attempts=80,   # 20 wandering sheep + "It's not in the mood" refusals
+```
+
+22 is not a guess: `T125` asserts the **whole documented pen rectangle** `(3190..3212, 3258..3282)`
+sits inside the declared radius, and that the wheat field (25+ tiles away) stays outside.
+
+### 16.4 Anti-false-positive guarantees
+
+* `T123`: a bot in Lumbridge is still routed to the farm, and a tile 23 tiles from the anchor (one
+  outside the radius) still walks — the radius never becomes "shear from anywhere".
+* `T124`: 30 consecutive failed shears do **not** escalate, but a pen that never yields still halts
+  with the exact same string `SUPPLY_STEP_STALLED:Wool:NPC:Sheep` at attempt 81.
+* `T127`: **surgical scope** — exactly one step in the entire recipe table carries `area_radius` or
+  `max_attempts` (the `Sheep` `Shear`); the wheat-field control proves the default 3-tile gate is
+  still enforced elsewhere.
+
+### 16.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T122` | every documented sheep tile shears; a full loop around the pen never pulls the bot back |
+| `T123` | outside the pen the engine still navigates (Anti-false-positive) |
+| `T124` | livestock budget: no early escalation, still escalates at its own limit |
+| `T125` | the whole pen rectangle fits inside `area_radius` (the `T101` rule, applied to a work site) |
+| `T126` | kernel run against **moving** sheep (they hop between documented tiles and refuse 1 in 5) → 20 wool → plane-1 spin → Fred → `Varp 179 = 21` |
+| `T127` | surgical scope: only the livestock step is widened |
+
+Full suite: **`135 passed`** (`T01..T127`), `0 failed`.
+
+### 16.6 Known next risks on this leg (pre-declared, not yet fixed)
+
+1. **Spinning wheel object id is still name-matched.** `Ball of wool` spins at `(3209,3212, plane 1)`
+   via `INTERACT_OBJECT {"name": "Spinning wheel", "action": "Spin"}`. No live probe has confirmed
+   the object id or the action spelling yet. Watch for
+   `SUPPLY_STEP_STALLED:Ball of wool:OBJECT:Spinning wheel`; the fix is a live `GET /objects?name=Spinning`
+   probe → pin `object_id`.
+2. **The castle north staircase** `(3205,3227)` is wiki-derived; if the climb escalates, expect
+   `SUPPLY_CLIMB_FAILED:LUMBRIDGE_CASTLE_NORTH_STAIRS` and probe the real stair tile.
+3. **Goblin crates are positional in name only.** All three steps search `{"name": "Crate"}` and the
+   client picks the *nearest* crate, which may already have been looted. Expect a repeat-search dead
+   end on the 2nd/3rd mail.

@@ -22,6 +22,8 @@ Design invariants:
 - Every step carries cumulative `produces` tuples (`(item_id, cumulative_qty)`), which makes repeated
   gathering (e.g. 3 Goblin mails) naturally resumable.
 - No `time.sleep`, no HTTP, no sockets — returns declarative `TaskDirective` only.
+- `PR-20.1` work-site radius: a step may declare `area_radius` when its target WANDERS (Fred's
+  sheep pen), so the bot is not tethered to one anchor tile, plus a per-step `max_attempts` budget.
 - `PR-20` consumption latch: a step that DESTROYS inventory (`uses_up`) is never "done" merely
   because it was dispatched; it completes only when the live inventory actually shrinks, and the next
   step waits out a short action-grace window (`settle_ticks`) so the client can finish its animation.
@@ -131,6 +133,15 @@ class SupplyStep:
     # chain may be dispatched (`None` = engine default). Prevents the client from being interrupted
     # mid-animation.
     settle_ticks: int | None = None
+    # `PR-20.1` FIELD FIX (incident #7): a step whose target WANDERS cannot be served by one anchor
+    # tile + the global 3-tile tolerance. Fred's sheep roam a ~20x20 pen, so a bot standing next to a
+    # sheep 6 tiles from the anchor tile was declared "outside the area" and dragged back — the
+    # tether ping-pong. `area_radius` widens the *work site*, not the routing: outside it the engine
+    # still navigates normally.
+    area_radius: int | None = None
+    # `PR-20.1` per-step attempt budget (`None` = engine default `MAX_STEP_ATTEMPTS`). Wandering
+    # livestock genuinely needs more than 26 ticks between successful shearings.
+    max_attempts: int | None = None
     note: str = ""
 
 
@@ -345,7 +356,19 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 action="Shear",
                 consumes=((SHEARS_ID, 1),),
                 produces=((WOOL_ID, 20),),
-                note="shear 20x (repeat step, Ram/'The Thing' cannot be sheared)",
+                # `PR-20.1` FIELD FIX (incident #7, tick 431): `LUMBRIDGE_SHEEP_FARM` is a single tile
+                # at the pen's corner and the sheep roam a ~20x20 pen. With the global 3-tile
+                # tolerance the engine pulled the bot back to that corner the moment it chased a sheep
+                # 6 tiles away — `Shear` -> dragged back -> `Shear` -> ... until
+                # `SUPPLY_STEP_STALLED:Wool:NPC:Sheep`.
+                # 22 tiles is the chebyshev distance from the corner anchor (3190,3273) to the
+                # pen's far corner (3212,3258), so the ENTIRE documented pen is a valid work site
+                # (T125 asserts every corner of the rectangle is inside).
+                area_radius=22,
+                # 26 attempts (~16s) is far too tight for 20 wandering sheep; 80 leaves room for
+                # failed shears ("It's not in the mood") while still escalating a truly broken pen.
+                max_attempts=80,
+                note="shear 20x inside the pen (repeat step, Ram/'The Thing' cannot be sheared)",
             ),
         ),
     ),
@@ -903,7 +926,9 @@ class ZeroTouchSupplyEngine:
                 self._alias_cursor.pop(key, None)
         attempts = self._attempts.get(key, 0) + 1
         self._attempts[key] = attempts
-        if attempts > self.max_step_attempts:
+        # `PR-20.1`: wandering livestock (and other repeat-gather sites) get a wider, explicit budget.
+        budget = self.max_step_attempts if step.max_attempts is None else int(step.max_attempts)
+        if attempts > budget:
             return self._escalate(
                 f"SUPPLY_STEP_STALLED:{recipe.label}:{step.kind}:{step.targets[0] if step.targets else recipe.label}"
             )
@@ -1054,10 +1079,16 @@ class ZeroTouchSupplyEngine:
         )
 
     def _at_area(self, ctx: TickContext, step: SupplyStep) -> bool:
+        """Is the bot inside this step's WORK SITE?
+
+        `PR-20.1`: sites that contain wandering targets (Fred's sheep pen) declare a wider
+        `area_radius`; every other step keeps the tight global `walk_tolerance`.
+        """
         assert step.area is not None
+        tolerance = self.walk_tolerance if step.area_radius is None else int(step.area_radius)
         return (
             ctx.position.plane == step.area.plane
-            and ctx.position.chebyshev_distance(step.area) <= self.walk_tolerance
+            and ctx.position.chebyshev_distance(step.area) <= tolerance
         )
 
     def _settle_for(self, step: SupplyStep) -> int:
