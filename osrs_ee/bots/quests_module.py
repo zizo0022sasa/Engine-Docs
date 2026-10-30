@@ -108,15 +108,10 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # anchor bank. The operator never supplies GP — this is the bot's own Stage-2 income.
         self._coin_float_resolved = False
         self._coin_float_unavailable = False
+        # `PR-21`: how many GP were actually missing when the account ran dry — carried into the
+        # escalation string so the next field report is self-explanatory.
+        self._coin_shortfall_gp = 0
         # `PR-20.7`: in-world coin EARNING (pickpocketing) once every bank is proven empty.
-        self._coin_earning = False
-        self._coin_earn_attempts = 0
-        # `PR-20.8`: where the bot is currently earning, its best purse seen, and its strike count —
-        # a rejected pickpocket looks exactly like an unlucky one unless the purse is watched.
-        self._coin_best_gp = -1  # -1 = "no baseline observed yet" (0 is a legitimate purse)
-        self._coin_no_progress = 0
-        # `PR-20.9`: game tick of the last issued attempt — the stun window must expire first.
-        self._coin_earn_last_tick: int | None = None
         # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
         # run*, never on QP the account already carried from earlier stages.
         self._baseline_quest_points: int | None = None
@@ -222,8 +217,10 @@ class TradeUnlockQuestsTaskModule(TaskModule):
           2. persisted snapshot from `state.db` -> trusted immediately, NO walk at all;
           3. nothing known   -> one single live audit at the GE anchor.
         """
-        if self._bank_audit_done:
-            return None
+        # `PR-21`: an OPEN bank is always re-read. `_bank_audit_done` used to latch forever, so a
+        # bank audited BEFORE a deposit stayed "empty" for the whole run — the same one-way-latch
+        # defect as `_coin_float_resolved` (incident #11). Re-reading costs nothing here: the data is
+        # already on screen. The latch still guards the expensive decision (whether to WALK to a bank).
         if ctx.bank_is_open and ctx.position.plane == 0:
             near_any_bank = any(
                 DEFAULT_WORLD_NODES.get(node_id) is not None
@@ -232,18 +229,33 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             )
             if near_any_bank or ctx.bank_items:
                 audited_ids = self._audited_item_ids()
-                self._bank_stock = {
+                refreshed = {
                     iid: _inv_count(ctx.bank_items, item_id=iid, noted=False) for iid in audited_ids
                 }
-                self._bank_audit_done = True
+                # `PR-21`: MERGE, never overwrite. The live snapshot is treated as a LOWER BOUND on
+                # what the vault holds: a deposit made after we last looked is learned (incident #15's
+                # cousin — a bank audited before the Stronghold payout stayed "empty" for the whole
+                # run), while a partial report can never make the engine forget a known stack. An
+                # EMPTY `bank_items` with the bank open means "not reported", the same rule
+                # `run_energy_pct` already follows — silence is not zero.
+                self._bank_stock = {
+                    iid: max(int(refreshed.get(iid, 0)), int(self._bank_stock.get(iid, 0)))
+                    for iid in audited_ids
+                }
                 self._bank_source = "LIVE"
-                return TaskDirective(
-                    directive_type=DirectiveType.WAIT_NEXT_TICK,
-                    reason=(
-                        "Zero-Touch supply: bank audited live "
-                        f"({sum(1 for v in self._bank_stock.values() if v)} usable stacks)"
-                    ),
-                )
+                if not self._bank_audit_done:
+                    self._bank_audit_done = True
+                    return TaskDirective(
+                        directive_type=DirectiveType.WAIT_NEXT_TICK,
+                        reason=(
+                            "Zero-Touch supply: bank audited live "
+                            f"({sum(1 for v in self._bank_stock.values() if v)} usable stacks)"
+                        ),
+                    )
+                self._bank_audit_done = True
+                return None   # silent refresh: the vault changed, no tick wasted announcing it
+        if self._bank_audit_done:
+            return None
         if ctx.bank_summary:
             audited_ids = self._audited_item_ids()
             self._bank_stock = {
@@ -307,149 +319,47 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
             self._coin_float_resolved = True
-            # `PR-20.7`: the earned purse is spent on the dyes, so the earning counter only resets
-            # once the float is whole again — never mid-chain.
-            self._coin_earn_attempts = 0
-            self._coin_earning = False
+            self._coin_shortfall_gp = 0
             return None
         self._coin_float_resolved = False
-        if self._coin_earning:
-            return self._earn_coins(ctx)
         # Only top up what is actually missing (a bot that already earned Fred's 60 GP needs nothing).
         directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP - held, "Coins")
         if directive is None:
             self._coin_float_resolved = True
             return None
         if directive.directive_type == DirectiveType.ESCALATE_HUMAN:
-            # `PR-20.7` FIELD TRUTH: the bank is genuinely empty (live `GET /bank` on `acc_02`:
-            # 6 items, ZERO coins — the documented 10,000 GP of `PR-17.5` is not there). The old
-            # behaviour — give up and let the dye step escalate — left an entirely able account
-            # blocked for want of 30 GP. The bot now EARNS the money the way a player would.
-            self._coin_earning = True
-            self._coin_best_gp = held
-            self._coin_no_progress = 0
-            self._coin_earn_last_tick = None
-            return self._earn_coins(ctx)
+            # `PR-21` FIELD TRUTH (incident #15): `PR-20.7`..`PR-20.9` tried to earn this from
+            # pickpocketing — and **Thieving is a members-only skill in OSRS**. The OSRS Wiki's
+            # `Members` page lists it under "Members-only skills", and a free-to-play world refuses
+            # every attempt. That whole branch was deleted, not patched: an F2P bundle may never emit a
+            # members-only action (`f2p_legality.MEMBERS_ONLY_ACTIONS`).
+            #
+            # What is left is the honest report plus the ONE legal, deterministic, zero-touch income
+            # the free world offers: Doric's Quest (180 coins, no requirements, F2P).
+            self._coin_shortfall_gp = self.COIN_FLOAT_GP - held
+            self._coin_float_unavailable = True
+            return TaskDirective(
+                directive_type=DirectiveType.ESCALATE_HUMAN,
+                reason=(
+                    f"SUPPLY_UNSOURCED:Coins:short_by_{self._coin_shortfall_gp}GP"
+                    f":next={self.F2P_FUNDING_PLAN[0]}"
+                ),
+            )
         return directive
 
     # ------------------------------------------------------------------
-    # `PR-20.7` Zero-Touch coin EARNING (no operator GP, no shop, no guessing)
+    # `PR-21` F2P FUNDING — declared, not invented
     # ------------------------------------------------------------------
-    # `Pickpocket` goes through the SAME `/npcs/interact` shape already LIVE proven twice over:
-    # `Talk-to` (Aggie / Wyson / Fred) and `Shear` (Sheep, 20 wool). A name-based action on a proven
-    # endpoint — not a widget guess, not a shop interface.
-    COIN_EARN_ATTEMPT_CAP = 80
-    # `PR-20.8` FIELD FIX (incident #13): `PR-20.7` assumed Draynor village was full of citizens. The
-    # live `GET /npcs?maxDistance=30` census says otherwise — Draynor holds Bankers, Bank guard, Wise
-    # Old Man, Miss Schism, Ned, Aggie, Diango, Fortunato and NOT ONE `Man`/`Woman`, so every attempt
-    # came back `{"success": false, "reason": "NPC not found"}`.
-    #
-    # `PR-20.9` FIELD FIX (incident #14): the courtyard was RIGHT — the live census found 6 men and 3
-    # women, nearest one tile away — but `PR-20.8` then relocated to `VARROCK_SQUARE` anyway, walking a
-    # level-3 account through the dark-wizard corridor. The fallback is GONE: one field-confirmed hub,
-    # and the engine reports instead of wandering. (Varrock square is a fine hub for a level-30
-    # account; it is not one for this account, and the engine may not gamble the character to prove a
-    # point.)
-    COIN_EARN_NODE = "LUMBRIDGE_CASTLE_COURTYARD"
-    PICKPOCKET_TARGETS: tuple[str, ...] = ("Man", "Woman")
-    COIN_EARN_RADIUS = 12
-    # `PR-20.9` — THE fix for incident #14. A failed pickpocket STUNS the player for ~3.0s (5 game
-    # ticks) with the little birds circling, and during the stun the game refuses every further
-    # attempt. `PR-20.8` fired one attempt per tick, so six "strikes" were really ONE failure plus five
-    # interactions swallowed by the stun — the engine concluded the courtyard was barren and marched
-    # 250 tiles to Varrock on the strength of a single unlucky roll. Space the attempts.
-    COIN_EARN_SETTLE_TICKS = 5
-    # `PR-20.8`: a REJECTED pickpocket and an unlucky one look identical to a counter, so the purse is
-    # watched instead. With the stun now respected, six genuinely fruitless attempts is enough evidence
-    # that the target is wrong (0.5^6 ~ 1.6% false alarm) — and the response is a report, never a trek.
-    COIN_EARN_NO_PROGRESS_LIMIT = 6
-
-    def _earn_coins(self, ctx: TickContext) -> TaskDirective | None:
-        """Earn the missing dye budget in-world (`PR-20.7`), one PACED pickpocket at a time.
-
-        Three field incidents shaped this method:
-          * `#13` — the location was a guess; it is now the field-censused Lumbridge courtyard.
-          * `#13` — a rejected interaction is not an unlucky one; the purse is watched, not the call.
-          * `#14` — an unlucky one is not a barren one either: the stun must expire before the next
-            attempt, or one bad roll is amplified into "this place has no money".
-        """
-        held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
-        if held >= self.COIN_FLOAT_GP:
-            self._coin_earning = False
-            self._coin_float_resolved = True
-            self._coin_earn_attempts = 0
-            self._coin_no_progress = 0
-            self._coin_best_gp = -1
-            self._coin_earn_last_tick = None
-            return None
-        # Progress watch: ANY new GP resets the strike count; silence is evidence, but only once the
-        # stun has been given time to end. The FIRST observation only establishes the baseline —
-        # adopting it must not wipe strikes already earned.
-        if self._coin_best_gp < 0:
-            self._coin_best_gp = held
-        elif held > self._coin_best_gp:
-            self._coin_best_gp = held
-            self._coin_no_progress = 0
-        # The safety layer owns a danger tick: never start a new crime while IN_DANGER.
-        if ctx.in_danger:
-            return TaskDirective(
-                directive_type=DirectiveType.WAIT_NEXT_TICK,
-                reason=f"Zero-Touch earnings: holding ({held}/{self.COIN_FLOAT_GP} GP) until safe",
-            )
-        if self._coin_earn_attempts >= self.COIN_EARN_ATTEMPT_CAP:
-            self._coin_float_unavailable = True
-            self._coin_earning = False
-            return TaskDirective(
-                directive_type=DirectiveType.ESCALATE_HUMAN,
-                reason=f"SUPPLY_UNSOURCED:Coins:pickpocket_exhausted({self._coin_earn_attempts})",
-            )
-        # Action grace (`PR-20.9`): one attempt per stun window, and a waiting tick is NOT a strike.
-        if (
-            self._coin_earn_last_tick is not None
-            and int(ctx.game_tick) - int(self._coin_earn_last_tick) < self.COIN_EARN_SETTLE_TICKS
-        ):
-            return TaskDirective(
-                directive_type=DirectiveType.WAIT_NEXT_TICK,
-                reason=(
-                    f"Zero-Touch earnings: letting the pickpocket stun expire "
-                    f"({int(ctx.game_tick) - int(self._coin_earn_last_tick)}/{self.COIN_EARN_SETTLE_TICKS} ticks)"
-                ),
-            )
-        if self._coin_no_progress >= self.COIN_EARN_NO_PROGRESS_LIMIT:
-            # Six genuinely silent attempts at the field-confirmed hub: report it and stop. The bot
-            # never walks to another town to prove a point with a level-3 character.
-            self._coin_float_unavailable = True
-            self._coin_earning = False
-            return TaskDirective(
-                directive_type=DirectiveType.ESCALATE_HUMAN,
-                reason=f"SUPPLY_UNSOURCED:Coins:no_progress({self.COIN_EARN_NODE})",
-            )
-        node = DEFAULT_WORLD_NODES.get(self.COIN_EARN_NODE)
-        if (
-            node is not None
-            and ctx.position.plane == 0
-            and ctx.position.chebyshev_distance(node) > self.COIN_EARN_RADIUS
-        ):
-            return TaskDirective(
-                directive_type=DirectiveType.NAVIGATE_TO,
-                destination=self.COIN_EARN_NODE,
-                reason=(
-                    f"Zero-Touch earnings: walking to {self.COIN_EARN_NODE} to earn "
-                    f"{self.COIN_FLOAT_GP - held} GP more"
-                ),
-            )
-        target = self.PICKPOCKET_TARGETS[self._coin_earn_attempts % len(self.PICKPOCKET_TARGETS)]
-        self._coin_earn_attempts += 1
-        self._coin_no_progress += 1
-        self._coin_earn_last_tick = int(ctx.game_tick)
-        return TaskDirective(
-            directive_type=DirectiveType.INTERACT_NPC,
-            payload={"name": target, "action": "Pickpocket"},
-            reason=(
-                f"Zero-Touch earnings: pickpocketing {target} at {self.COIN_EARN_NODE} "
-                f"({held}/{self.COIN_FLOAT_GP} GP, attempt {self._coin_earn_attempts})"
-            ),
-        )
+    # The free world has exactly one quest that pays coins with zero requirements:
+    # Doric's Quest — 180 coins + 1 QP + 1300 Mining XP, items 6 clay / 4 copper ore / 2 iron ore,
+    # and Doric hands out a bronze pickaxe if you have none.
+    # `IMPLEMENTED` = everything up to the coin shortfall report. `PLANNED` = the actual mining +
+    # hand-off chain, which needs three READ-ONLY probes before a single tile is committed
+    # (rock object ids, Doric's live dialogue options, the account's Mining level).
+    F2P_FUNDING_PLAN: tuple[str, ...] = ("DORIC_QUEST_180GP",)
+    # Never hand-carried, always banked: a purse larger than the working float is dead weight that a
+    # death converts into nothing. `PR-21` capital protection.
+    CAPITAL_PROTECT_SURPLUS_GP = 1
 
     def _procure(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
         """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""
@@ -561,7 +471,10 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # 80 pickpocket attempts — so the demand gate covers earning too.
         if self._coins_still_needed(ctx, outstanding):
             coin_float = self._ensure_coin_float(ctx)
-            if coin_float is not None:
+            # `PR-21`: a FUNDING escalation must never stall the free half of the stage. The plain
+            # brown mail costs nothing; gather it while the money question is still open, and let the
+            # dye step escalate later if the purse never arrives.
+            if coin_float is not None and coin_float.directive_type != DirectiveType.ESCALATE_HUMAN:
                 return coin_float
         for item_id, label in outstanding:
             directive = self._procure(ctx, item_id, 1, label)

@@ -327,12 +327,6 @@ def test_t68_goblin_diplomacy_use_item_on_item_wire_protocol_and_closed_bank_gua
                 self._json(200, {"success": True})
                 return
             if self.path == "/npcs/interact":
-                if str(body.get("action", "")).casefold() == "pickpocket":
-                    # `PR-20.7`: the wire fake models the real mechanic — a citizen yields 3 GP.
-                    for _ in range(3):
-                        world["inv"].append({"id": 995, "name": "Coins", "quantity": 1, "noted": False})
-                    self._json(200, {"success": True})
-                    return
                 if body.get("name") == "General Bentnoze":
                     # Coins legitimately survive the trip to the generals (the bot keeps its change),
                     # exactly as `T69` already accepts for the live run.

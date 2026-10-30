@@ -1271,3 +1271,93 @@ That is the right trade: a stopped bot is recoverable in one operator command, a
 | `T156` | an `IN_DANGER` tick never starts a new pickpocket and never burns a strike |
 
 Full suite: **`164 passed`** (`T01..T156`), `0 failed`.
+
+---
+
+## 25. `PR-21` — Incident #15: Thieving is members-only, and three PRs died for it
+
+### 25.1 The retraction
+
+`PR-20.7`, `PR-20.8` and `PR-20.9` taught the bot to pickpocket Lumbridge citizens for the last
+**30 GP** of the Goblin Diplomacy dyes. They fixed a wrong location, added a progress watcher, and
+paced attempts around the stun window. All three were well-engineered and **all three were worthless**:
+
+> OSRS Wiki, `Members` — *"Out of the 24 skills in Old School RuneScape, nine of them are only
+> available in members' worlds: Herblore, Hunter, **Thieving**, Slayer, ..."*
+
+Live confirmation: every attempt reached the client (`{"ok": true}`), and
+`GET /skills -> {"name": "Thieving", "level": 1, "xp": 0}` never moved. **A free-to-play world refuses
+the skill outright.**
+
+### 25.2 Why the engine could not have caught this on its own
+
+`POST /npcs/interact` answers `{"ok": true}` whenever the call reaches the client — whether the game
+performs the action or refuses it. There is no error field for "members only", no XP delta the engine
+can read mid-tick, and no way to distinguish a refusal from a slow response. **The engine cannot see a
+legality refusal.** Therefore the rule has to live in the bundle's *contract*, enforced at review time.
+
+Hence `osrs_ee/bots/f2p_legality.py`: `MEMBERS_ONLY_SKILLS`, `MEMBERS_ONLY_ACTIONS`,
+`assert_f2p_safe()`, and `scan_module_source()` — a source scan (string literals only, so the comment
+explaining the ban does not trip it) that `T157` runs over the whole bots package.
+
+The pickpocket path is **deleted, not disabled**: `_earn_coins`, `COIN_EARN_*`, `PICKPOCKET_TARGETS`,
+the `FakeGameAdapter` shim and the `T68` wire shim are all gone, and `T147..T156` are retired with this
+commit.
+
+### 25.3 What the engine reports now
+
+```
+SUPPLY_UNSOURCED:Coins:short_by_34GP:next=DORIC_QUEST_180GP
+```
+
+An exact number and a named way out. And a funding escalation **never stalls the free half of the
+stage**: the plain brown goblin mail costs nothing, so the bot keeps gathering it while the money
+question is open (`T159b`).
+
+### 25.4 The `10,000 GP` audit — closed
+
+The live `GET /bank` on `acc_02` returns six items, all Tutorial-Island starter gear plus
+`Fancy boots (9005)`, and **zero coins**. `Fancy boots` proves `PR-17.5` really did clear the Stronghold
+and really did deposit; the coins were never in the vault. Recorded as: **the "10,000 GP banked" claim
+in `PROGRESS.md` was never verified by a probe and must not be cited as fact.** (A second audit finding
+sits next to it: `_bank_audit_done` latched forever, so a bank audited *before* a payout stayed
+"empty" for the rest of the run — the same one-way-latch family as `_coin_float_resolved`. The snapshot
+now merges monotonically, and an un-reported `bank_items` is treated as silence, never as zero.)
+
+### 25.5 The one legal F2P income, and what it costs
+
+**Doric's Quest** is the only free quest that pays coins with **no requirements**:
+
+| | |
+|---|---|
+| reward | **180 coins** + 1 QP + 1300 Mining XP |
+| items | 6 clay · 4 copper ore · 2 iron ore |
+| tool | Doric **gives a bronze pickaxe** if you have none |
+| gate | Mining **15** — only to *mine* the iron |
+| danger | Rimmington mine is safe; the Dwarven Mine has scorpions |
+
+180 coins against a 35-coin budget: a 5× margin, re-earnable, deterministic, and 100% zero-touch.
+
+Status: `PLANNED`. Building it needs three **read-only** probes first — the wiki is a hint, the probe is
+truth:
+
+1. `GET /skills?id=14` → the account's **Mining level** (iron ore needs 15; if it is below, the chain
+   must train first).
+2. `GET /objects?name=Iron rocks&maxDistance=40` at Rimmington / Varrock east → the **rock object ids**.
+3. `GET /dialogue` while talking to **Doric** → his live option texts (the same discipline that produced
+   `"What could you make for me?"` for Aggie).
+
+No tile, id or dialogue line will be committed from the wiki.
+
+### 25.6 Verification
+
+| test | guarantee |
+|---|---|
+| `T157` | no module in `osrs_ee/bots/` may contain a members-only action or skill as a literal |
+| `T158` | the guard raises rather than trusting a `{"ok": true}` from the client |
+| `T159` | a broke account reports `short_by_34GP:next=DORIC_QUEST_180GP` — once |
+| `T159b` | a funding dead end never stalls the free half of the goblin stage |
+| `T160` | the carried purse is capped at the working float, so a death costs the float, not the account |
+
+Full suite: **`159 passed`**, `0 failed` (`T01..T146`, `T157..T160`; `T147..T156` retired with the
+members-only path).
