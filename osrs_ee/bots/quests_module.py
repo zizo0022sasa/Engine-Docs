@@ -42,7 +42,7 @@ from osrs_ee.bots.supply_procurement import (
     ZeroTouchSupplyEngine,
 )
 from osrs_ee.navigation.underground import classify_underground
-from osrs_ee.navigation.waypoint_graph import WorldPoint
+from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
 
 VARP_COOKS_ASSISTANT = 29
 VARP_SHEEP_SHEARER = 179
@@ -153,14 +153,48 @@ class TradeUnlockQuestsTaskModule(TaskModule):
     # ------------------------------------------------------------------
     # Zero-Touch Supply Procurement (PR-19 `Zero-Touch Invariant`)
     # ------------------------------------------------------------------
-    def _goto_anchor_bank(self, ctx: TickContext, reason: str) -> TaskDirective:
+    # `PR-20.6`: every verified surface bank. A withdrawal never cares WHICH bank it is — only the
+    # GRAND_EXCHANGE is a mission anchor (the QP latch homes there), not a funding requirement.
+    BANK_NODES: tuple[str, ...] = (
+        "DRAYNOR_BANK",
+        "VARROCK_WEST_BANK",
+        "FALADOR_WEST_BANK",
+        "EDGEVILLE_BANK",
+        "AL_KHARID_BANK",
+        "GRAND_EXCHANGE",
+    )
+
+    def _nearest_bank_node(self, ctx: TickContext) -> str:
+        """Closest verified bank to the bot (`PR-20.6`).
+
+        The live failure mode: standing 13 tiles from the Draynor bank with 1 GP, while the funding
+        logic insisted on a 200+ tile trek to the Grand Exchange — straight through the corridor that
+        had already killed the account once.
+        """
+        best_node = self.anchor_bank_node
+        best_distance = float("inf")
+        for node_id in self.BANK_NODES:
+            node = DEFAULT_WORLD_NODES.get(node_id)
+            if node is None or node.plane != ctx.position.plane:
+                continue
+            distance = float(ctx.position.chebyshev_distance(node))
+            if distance < best_distance:
+                best_distance = distance
+                best_node = node_id
+        return best_node
+
+    def _goto_anchor_bank(self, ctx: TickContext, reason: str, *, nearest: bool = False) -> TaskDirective:
+        # `PR-20.6`: coin FUNDING uses the nearest bank (the live account stood 13 tiles from the
+        # Draynor bank while the engine insisted on a 200+ tile GE trek). Everything else — the
+        # one-time bank audit, the mission anchor — keeps the original anchor semantics.
+        node_id = self._nearest_bank_node(ctx) if nearest else self.anchor_bank_node
         if ctx.position.plane != 0:
             return self._descend_to_ground(ctx.position, reason)
-        anchor_wp = WorldPoint(3164, 3487, 0, self.anchor_bank_node)
-        if ctx.position.chebyshev_distance(anchor_wp) > 4:
+        anchor_wp = DEFAULT_WORLD_NODES.get(node_id)
+        if anchor_wp is None or ctx.position.chebyshev_distance(anchor_wp) > 4:
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
-                destination=self.anchor_bank_node,
+                destination=node_id,
                 reason=reason,
             )
         return TaskDirective(
@@ -182,7 +216,12 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         if self._bank_audit_done:
             return None
         if ctx.bank_is_open and ctx.position.plane == 0:
-            if ctx.position.chebyshev_distance(WorldPoint(3164, 3487, 0)) <= 4 or ctx.bank_items:
+            near_any_bank = any(
+                DEFAULT_WORLD_NODES.get(node_id) is not None
+                and ctx.position.chebyshev_distance(DEFAULT_WORLD_NODES[node_id]) <= 6
+                for node_id in self.BANK_NODES
+            )
+            if near_any_bank or ctx.bank_items:
                 audited_ids = self._audited_item_ids()
                 self._bank_stock = {
                     iid: _inv_count(ctx.bank_items, item_id=iid, noted=False) for iid in audited_ids
@@ -250,19 +289,25 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         Deliberately SOFT: if the account holds no coins at all the bundle keeps going, and the
         precise `SUPPLY_UNSOURCED:Coins` escalation still fires later, at the dye step that needs it.
         """
-        if self._coin_float_resolved:
+        # `PR-20.6` DEATH-TAX FIX: this used to be a one-way latch. The live account was funded
+        # (`_coin_float_resolved = True`), then died to a Highwayman and kept 1 GP of its 55 — and the
+        # engine never topped up again because the flag said "already handled". The purse is re-derived
+        # from the live inventory every tick (the same stateless rule as the supply engine itself).
+        if self._coin_float_unavailable:
             return None
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
             self._coin_float_resolved = True
             return None
+        self._coin_float_resolved = False
         # Only top up what is actually missing (a bot that already earned Fred's 60 GP needs nothing).
         directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP - held, "Coins")
         if directive is None:
             self._coin_float_resolved = True
             return None
         if directive.directive_type == DirectiveType.ESCALATE_HUMAN:
-            self._coin_float_resolved = True
+            # No coins anywhere in the bot's own economy: stop asking the bank every tick and let the
+            # exact `SUPPLY_UNSOURCED:Coins` escalate at the dye step that actually needs them.
             self._coin_float_unavailable = True
             return None
         return directive
@@ -286,7 +331,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             return audit
         if self._bank_stock.get(item_id, 0) >= quantity:
             if not ctx.bank_is_open:
-                return self._goto_anchor_bank(ctx, f"Zero-Touch supply: returning to bank for {label}")
+                return self._goto_anchor_bank(
+                    ctx,
+                    f"Zero-Touch supply: returning to bank for {label}",
+                    nearest=(item_id == COINS_ID),
+                )
             return TaskDirective(
                 directive_type=DirectiveType.BANK_TURNAROUND,
                 payload={

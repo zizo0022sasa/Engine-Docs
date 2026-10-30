@@ -970,3 +970,80 @@ The bot was rescued at **2 HP with no food**. `ReactiveSafetyWatchdog` behaved e
 range, `PR-19.5`), and natural regeneration inside the bank brings it back to 10/10 — but the mission
 should not resume at 2 HP. Wait for full HP (or stage food with `--require-food-count`) before the next
 `attach-bot` run. The engine cannot out-heal a level-20 wizard; it can only out-run one.
+
+---
+
+## 21. `PR-20.6` — The death tax, and why no operator money was ever needed (field incident #11)
+
+### 21.1 What the field actually lost
+
+Incident #10 killed the account. OSRS keeps only the three most valuable items on death, so the bot
+respawned in Lumbridge with `Red dye` + `Shears` + **1 GP**; the other 54 GP of Fred's reward stayed on
+the ground. Outstanding dye budget: `5 (yellow) + 20 (woad) + 5 (blue) = 30 GP`.
+
+### 21.2 The two field proposals, and why one of them is off the table
+
+| proposal | verdict |
+|---|---|
+| **Put 50 GP into the account / sell the bow+axe by hand at the shop** | ❌ **Rejected.** This is an operator hand-out and an operator mouse click — precisely what the ratified `Zero-Touch Invariant` forbids (`"⛔ نرفض الخيار (ب) والتدخل اليدوي رفضاً قاطعاً!"`). The protocol exists so the project proves an engine, not a puppeteer. |
+| **PR-20.6: the bot restores its own funds** | ✅ Accepted — and it turned out not to need a shop at all |
+
+### 21.3 The account was never broke
+
+`Stage 2 Stronghold` banked **10,000 GP** on this very account (`LIVE_WIRE_VERIFIED`). The 55 GP was
+pocket money. So the correct behaviour was always available: **walk to a bank and withdraw the
+shortfall from the bot's own earnings.** Two bugs prevented it:
+
+1. **`_coin_float_resolved` was a one-way latch.** Once the bot had been funded, it could never be
+   funded *again*. After the death it kept asking Aggie for a dye it could not pay for, forever.
+2. **Funding only knew the anchor bank.** Standing 13 tiles from `DRAYNOR_BANK`, the engine insisted
+   on the Grand Exchange anchor **200+ tiles away** — through the corridor that had already killed the
+   account once.
+
+### 21.4 The fix
+
+```python
+# 1. re-derive the purse every tick (same stateless rule as the supply engine)
+held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
+if held >= self.COIN_FLOAT_GP: ... return None
+self._coin_float_resolved = False
+
+# 2. coin funding banks at the NEAREST verified bank
+BANK_NODES = ("DRAYNOR_BANK", "VARROCK_WEST_BANK", "FALADOR_WEST_BANK",
+              "EDGEVILLE_BANK", "AL_KHARID_BANK", "GRAND_EXCHANGE")
+```
+
+The nearest-bank rule is **scoped to funding only** (`nearest=(item_id == COINS_ID)`). The one-time bank
+audit and the mission anchor keep their original semantics — a first attempt that applied the rule
+everywhere broke five tests (`T86`, `T91`, `T95`, `T102`, `T107`) by dragging the audit walk to another
+town. Surgical scope, again.
+
+Also accepted: `_audit_bank_once` now treats **any** of the six verified banks as a valid place to take
+the live audit (previously a hardcoded GE distance check), so opening the Draynor bank counts.
+
+### 21.5 Shop selling — stated honestly as `PLANNED`, not implemented
+
+Liquidating banked gear at a general store is a legitimate *future* self-funding tier, but it is **not
+implementable without guessing**: the sale is a shop-interface click, and while `WIDGET_CLICK` is live
+proven for Make-X (`270:15`), the shop's `groupId`/`childId` pairs and the shopkeeper's live dialogue
+text have never been captured. Guessing widget coordinates is forbidden by the execution mandate.
+
+Unblocking it needs exactly one **read-only probe** (no mouse, no gameplay):
+
+```bash
+curl -s "http://127.0.0.1:8081/widgets?groupId=<shop>"   # with a shop open in the client
+```
+
+Until that exists, `PR-20.6` deliberately stops at "withdraw from your own bank", which is sufficient
+for this account and keeps the invariant intact.
+
+### 21.6 Verification
+
+| test | guarantee |
+|---|---|
+| `T143` | funding routes to the nearest bank (Draynor from Draynor, Falador West from the north-west) |
+| `T144` | the withdrawal is exactly the missing amount (34 of a 35 GP budget) from the bot's own bank |
+| `T145` | a funded bot that dies asks the bank again (the latch is gone) and settles once topped up |
+| `T146` | an account with no coins anywhere stops asking and escalates `SUPPLY_UNSOURCED:Coins` |
+
+Full suite: **`154 passed`** (`T01..T146`), `0 failed`.
