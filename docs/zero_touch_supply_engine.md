@@ -1509,3 +1509,81 @@ time**, not ten minutes. `--max-ticks 8000` is a ceiling, not an estimate.
 Account credentials, 2FA codes and mailboxes never enter this repository, `PROGRESS.md`, a commit
 message, or this transcript. The vault holds them (`vault://accounts/...`), and `credential_ref` is the
 only identifier any tracked file may carry.
+
+---
+
+## 28. PERMANENT INVARIANT — Stage 1A zero-touch economics (`AD-1`)
+
+> **Status: RATIFIED BY THE OPERATOR. Do not revise without new field evidence.**
+> Every number below was checked against the OSRS Wiki before it was written down; the checks are
+> cited so the next reader can re-run them instead of trusting this text.
+
+### 28.1 `AD-1.1` — The 60 GP ground truth
+
+Turning in **20 balls of wool** to Fred the Farmer (`Varp 179 = 21`) pays exactly **60 GP straight into
+the inventory**. Not a bank transfer, not an item, not a voucher — spendable cash in the bag.
+
+### 28.2 `AD-1.2` — The suite costs exactly 35 GP
+
+| line item | cost | verification |
+|---|---|---|
+| 2x woad leaves (Wyson, Falador park) | **20 GP** | 20 coins => 2 leaves |
+| red dye (3 redberries -> Aggie) | **5 GP** | *"each dye costs 5 coins to make"* — OSRS Wiki `Money making guide/Making dyes` |
+| yellow dye (2 onions -> Aggie) | **5 GP** | same |
+| blue dye (2 woad leaves -> Aggie) | **5 GP** | same |
+| orange dye | **0 GP** | free combine of red + yellow |
+| **total** | **35 GP** | `GOBLIN_DYE_BUDGET_GP = 20 + 5 * 3` |
+
+`60 - 35 = +25 GP` net surplus on an account that starts from zero.
+
+### 28.3 `AD-1.3` — The invariant itself
+
+A free-to-play account completing `stage1a_f2p_quests_10qp` requires:
+
+* **ZERO** external GP funding
+* **ZERO** bank cash withdrawals
+* **ZERO** Thieving (members-only — see §25)
+* **ZERO** manual operator intervention
+* **ZERO** shop sales
+
+The natural order `Cook's Assistant -> Sheep Shearer -> Romeo & Juliet -> Goblin Diplomacy` is **already
+self-funding by construction**: the only stage that spends money is the last one, and the quest that pays
+money is the second one. The coin float is demand-driven and sits exactly where the spend happens
+(`_prepare_goblin_diplomacy_supplies`), so a 0 GP account is never asked to fund anything early.
+
+### 28.4 `AD-1.4` — The forensic lesson
+
+Every historical failure to buy dyes was **a death, not a cash shortage**. `Incident #10` was a routing
+bug (the `Varp 62 == 0` gate -> a 250-tile hand-in walk) that ended in the Dark Wizard corridor with 55 GP
+in the bag. The 60 GP was real; it was dropped on the ground.
+
+The correct remedies are therefore the ones already shipped — **routing** (`PR-20.5`, `PR-20.6`) and
+**supply semantics** — and *not* a funding subsidy. `OPERATOR_FUNDED_RECOVERY` (§26) exists only for an
+account whose cash was **destroyed by our own defect**, and it is always tagged as such in
+`COMPLETE_TASK`.
+
+### 28.5 Capital protection — declared, deliberately NOT wired to a bank detour
+
+`CAPITAL_PROTECT_SURPLUS_GP` declares the policy ("never hand-carry more than the working float"). It is
+**not** wired to a bank trek before the acceptance run, on purpose:
+
+* the exposure at risk is the **25 GP surplus**, not the 60;
+* the only bank on the Lumbridge->Varrock leg is **Draynor**, ~90 tiles off-route, and the detour crosses
+  the same hazard class the invariant exists to avoid;
+* the engine already carries the cheaper protection that actually addresses Incident #10: a **safe
+  corridor planner** (`plan_safe_route`, `VARROCK_SOUTH_DARK_WIZARDS` hazard-gated at combat 26) and the
+  **nearest-bank withdrawal** (`PR-20.6`) that removed the 200-tile march.
+
+Trading 25 GP of tail exposure for a ~180-tile round trip through hostile ground is a net loss. Recorded
+here so it is a **decision**, not an oversight. If a run ever dies carrying more than 35 GP, revisit.
+
+### 28.6 Fleet decision (2026-10-30)
+
+| account | tutorial | QP | role | port |
+|---|---|---|---|---|
+| **`acc_01`** | complete (`varp 281 = 1000`, operator-verified) | 0 | **the acceptance run — first** | **8082 / slot 1** |
+| `acc_02` | complete | 8 | trophy run, `OPERATOR_FUNDED_RECOVERY` | 8081 / slot 0 |
+| `GAME-02` (`zozozooz`) | **not started** | 0 | future: tutorial + quests from absolute zero | TBD |
+
+`acc_01` is the acceptance run because `AD-1` predicts it finishes with `[funding=ZERO_TOUCH]` on **0 GP
+of external money**. That single completion validates `AD-1` end to end.
