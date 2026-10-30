@@ -531,7 +531,9 @@ def test_t69_e2e_stage1a_12qp_quests_with_tradeable_ge_dyes_and_juliet_balcony(t
                 ]
                 adapter.varps[144] = 50
             elif npc == "General Bentnoze":
-                inv_ids = sorted(int(i["item_id"]) for i in adapter.inventory_items)
+                # `PR-20.4`: the dye float leaves the bot's own change in the bag (live run ended
+                # with 55 GP). Coins are not a quest supply — compare everything else.
+                inv_ids = sorted(int(i["item_id"]) for i in adapter.inventory_items if int(i["item_id"]) != 995)
                 assert inv_ids == [286, 287, 288], f"Expected dyed armours [286, 287, 288], got {inv_ids}"
                 adapter.inventory_items.clear()
                 adapter.varps[62] = 6

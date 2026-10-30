@@ -806,3 +806,86 @@ wiki-derived tile**. Before the next field run, these are the suspects, in order
 3. **Wyson the gardener** — wanders Falador Park; the node `(3000,3375)` is a single tile in a large
    park (pen geometry again).
 4. **General Bentnoze / Wartface** — dialogue options are wiki transcripts, not live text.
+
+---
+
+## 19. `PR-20.4` — Aggie: the house tile, the dialogue text, and the coin float (field incident #9)
+
+### 19.1 Two defects, neither of them a crash
+
+The `PR-20.3` run crafted **`Red dye (1763)` live** (3 redberries + 5 GP) with 55 GP of change left in
+the bag — but the probe exposed two things the code had wrong:
+
+| # | Defect | Live truth |
+|---|---|---|
+| 1 | `DRAYNOR_AGGIE = (3087, 3232)` | Aggie is NPC **`120`** at `(3088, 3259)`; doorstep `(3086, 3258)` — the node was **26 tiles south, at the fishing pier** |
+| 2 | dialogue opener `"Can you make dyes for me please?"` | the on-screen option is **`"What could you make for me?"`** |
+
+Both are silent failures by design: the engine happily walked to the pier and talked to empty air, and
+its dialogue matcher only selects options it can *see*, so a wrong string just escalates
+(`UNRECOGNIZED_QUEST_DIALOGUE_OPTION`) after burning the attempt budget.
+
+### 19.2 Why the `id` was recorded but not used
+
+Aggie is also `NPC 120`, and `INTERACT_OBJECT` pins object ids everywhere. **`INTERACT_NPC` does not**,
+and it must not start guessing: `http_adapter` posts the payload verbatim to `POST /npcs/interact`,
+and there is **no live proof** that endpoint accepts an `id` field (unlike `/objects/interact`, whose
+id handling *is* proven). `AGGIE_NPC_ID = 120` is therefore recorded for the next probe round, and the
+interaction stays name-based. **Zero guessing** outranks symmetry.
+
+### 19.3 The coin float was over-eager
+
+`COIN_FLOAT_GP` was `512`, requested at the **top of the bundle** — so a bot that had done nothing yet
+trekked to the bank for money it would not spend for another hour. Now:
+
+```python
+COIN_FLOAT_GP = GOBLIN_DYE_BUDGET_GP = 20 + 5 * 3   # exactly what the dyes cost
+```
+
+* requested **only** when the Goblin stage starts (`_prepare_goblin_diplomacy_supplies`);
+* only for the **missing** amount (`budget - held`), so Fred's 60 GP reward covers it entirely;
+* a bot that already holds enough GP never touches the bank.
+
+### 19.4 The regression this release caused — and fixed
+
+Making the `PR-19.4` surface guard skip the whole *dependency tree* of an underground recipe was too
+coarse. A bot standing in the Lumbridge cellar holding a `Bucket` tried to `/walk` to the Grand
+Exchange for a `Bucket of milk` it could produce ten tiles away (`T91` caught it).
+
+The rule is now **situational**, not structural:
+
+```python
+supply.needs_descent_now(ctx, item_id)   # some ACTIONABLE step of the (recursive) recipe is underground
+```
+
+"Actionable" = its products are not already satisfied **and** its ingredients are obtainable. So:
+
+* at the GE needing a `Bucket` → descent required → guard skipped, the bot goes down;
+* in the cellar holding a `Bucket` needing `Bucket of milk` → no descent required → the authorized
+  exit still fires (`T91` green again).
+
+### 19.5 Harness truth worth recording
+
+The bot **keeps its change**: after the dyes, `Coins (995)` legitimately stays in the bag (live run
+ended with 55 GP). `T69` asserted an exact inventory of `[286, 287, 288]` and now excludes coins —
+the `Zero-Touch` invariant is about quest *supplies*, not about the bot's own money.
+
+### 19.6 Verification
+
+| test | guarantee |
+|---|---|
+| `T137` | Aggie's node is 2 tiles from her NPC, inside the documented area; standing on it talks instead of walking; Draynor bank edge honest (13) |
+| `T138` | the live opener is selected for all three dyes; the legacy string survives as an alias; an unknown menu still escalates |
+| `T139` | the float is 35 GP, only at the Goblin stage, only for the missing amount, never for a bot that already has change |
+
+Full suite: **`147 passed`** (`T01..T139`), `0 failed`.
+
+### 19.7 Remaining Goblin Diplomacy risk, updated
+
+The two live-proven suspects are now behind us (Aggie, Wyson's dialogue is next). What is left:
+
+1. **Goblin crates** — still three `{"name": "Crate"}` steps at one node `(2958,3512)`; the client
+   picks the nearest crate, which may be the looted one. **Highest risk of incident #10.**
+2. **Wyson** — wanders Falador Park; the node `(3000,3375)` is a single tile in a large park
+   (pen geometry). Also his live dialogue has not been captured yet.
+3. **Generals' dialogue** — wiki transcripts, not live text.

@@ -63,6 +63,10 @@ DAIRY_COW_OBJECT_ID = 8689
 WHEAT_OBJECT_ID = 15506        # live: `Wheat` action "Pick" at (3162,3296)
 MILL_DOOR_OBJECT_ID = 1521     # live: `Large door` (1521 / 1524) at (3166,3302)
 FLOUR_BIN_OBJECT_ID = 1781     # live: `Flour bin` at (3166,3306)
+# `PR-20.4` live probe: Aggie = NPC `120` at `(3088,3259)`. Recorded for the next probe round; the
+# interaction itself stays name-based because there is NO live proof that `POST /npcs/interact`
+# accepts an `id` field (unlike `/objects/interact`, which does). Zero guessing.
+AGGIE_NPC_ID = 120
 REDBERRY_BUSH_OBJECT_ID = 23628  # live: 2x `Redberry bush` at (3272,3375) & (3277,3371)  # PR-20.3
 SPINNING_WHEEL_OBJECT_ID = 14889  # live: `Spinning wheel` at (3209,3212) plane 1  # PR-20.2
 MILL_LADDER_OBJECT_ID = 12964  # live: `Ladder` at (3164,3307)  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
@@ -477,6 +481,9 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=BLUE_DYE_ID,
         label="Blue dye",
         dialogue_options=(
+            # `PR-20.4` LIVE VERBATIM: the on-screen opening option is "What could you make for me?"
+            # (the old string never appears in the client and burned the whole dye attempt budget).
+            "What could you make for me?",
             "Can you make dyes for me please?",
             "What do you need to make blue dye?",
             "Okay, make me some blue dye please.",
@@ -530,6 +537,7 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=RED_DYE_ID,
         label="Red dye",
         dialogue_options=(
+            "What could you make for me?",
             "Can you make dyes for me please?",
             "What do you need to make red dye?",
             "Okay, make me some red dye please.",
@@ -550,6 +558,7 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
         item_id=YELLOW_DYE_ID,
         label="Yellow dye",
         dialogue_options=(
+            "What could you make for me?",
             "Can you make dyes for me please?",
             "What do you need to make yellow dye?",
             "Okay, make me some yellow dye please.",
@@ -1073,14 +1082,64 @@ class ZeroTouchSupplyEngine:
         return False
 
     def recipe_is_underground(self, item_id: int) -> bool:
-        """True when `item_id` is produced BELOW ground (`PR-20`).
+        """True when `item_id` (or one of its ingredients) is produced BELOW ground (`PR-20`)."""
+        return self._requires_underground(item_id, depth=0)
+
+    def needs_descent_now(self, ctx: TickContext, item_id: int) -> bool:
+        """Does the CURRENT tick genuinely have to be spent underground for `item_id`? (`PR-20.4`)
 
         The `PR-19.4` surface guard exists so the bot never walks across the map from `y >= 5000`.
-        It must NOT preempt a recipe whose whole point is to go down there (the Lumbridge cellar
-        bucket) — otherwise the bot descends, is immediately marched back out, and ping-pongs until
-        `SUPPLY_ENTER_FAILED`.
+        It must not preempt a recipe whose next real errand is DOWN there (the Lumbridge cellar
+        bucket) — otherwise the bot descends, is marched straight back out, and ping-pongs until
+        `SUPPLY_ENTER_FAILED`. But the exemption must be *situational*, not structural: skipping the
+        guard for the whole dependency tree let a bot standing in the cellar try to `/walk` to the
+        Grand Exchange for a `Bucket of milk` it could produce ten tiles away (the `T91` regression).
+
+        Rule: descend-required == some *actionable* step in the (recursive) recipe is underground,
+        where "actionable" means its products are not already satisfied and its ingredients are
+        either held or obtainable. Ingredients already in the bag never force a descent.
         """
-        return self._requires_underground(item_id, depth=0)
+        held = _inv_qty(ctx.inventory_items, item_id)
+        if held > 0 and item_id in self.recipes:
+            recipe = self.recipes[item_id]
+            if recipe.steps and any(
+                step.produces
+                and all(_inv_qty(ctx.inventory_items, pid) >= q for pid, q in step.produces)
+                for step in recipe.steps
+            ):
+                return False
+        return self._needs_descent_now(ctx, item_id, depth=0)
+
+    def _needs_descent_now(self, ctx: TickContext, item_id: int, *, depth: int) -> bool:
+        if depth > MAX_RECURSION_DEPTH:
+            return False
+        recipe = self.recipes.get(item_id)
+        if recipe is None:
+            return False
+        underground_now = classify_underground(ctx.position.x, ctx.position.y) is not None
+        for step in recipe.steps:
+            if step.kind == SupplyStepKind.ENTER_UNDERGROUND:
+                if not underground_now:
+                    return True
+                continue
+            if step.kind == SupplyStepKind.EXIT_UNDERGROUND:
+                continue
+            if step.area is not None and classify_underground(step.area.x, step.area.y) is not None:
+                if step.produces and all(
+                    _inv_qty(ctx.inventory_items, pid) >= qty for pid, qty in step.produces
+                ):
+                    continue  # this underground errand is already done
+                if step.consumes and any(
+                    _inv_qty(ctx.inventory_items, nid) < nqty for nid, nqty in step.consumes
+                ):
+                    continue  # cannot be served yet; the ingredient comes first (recursed below)
+                return True
+            for needed_id, needed_qty in step.consumes:
+                if _inv_qty(ctx.inventory_items, needed_id) >= needed_qty:
+                    continue
+                if self._needs_descent_now(ctx, needed_id, depth=depth + 1):
+                    return True
+        return False
 
     def _requires_underground(self, item_id: int, *, depth: int) -> bool:
         """Recursive over the ingredient tree: `Bucket of milk` needs the cellar because its

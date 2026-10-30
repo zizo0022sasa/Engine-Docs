@@ -166,7 +166,9 @@ def test_t101_every_supply_node_sits_inside_its_documented_region() -> None:
         ("FRED_ONION_GARDEN", 3180, 3200, 3260, 3275),
         ("LUMBRIDGE_SHEEP_FARM", 3180, 3200, 3265, 3285),
         ("LUMBRIDGE_KITCHEN", 3195, 3215, 3205, 3225),
-        ("DRAYNOR_AGGIE", 3075, 3100, 3220, 3245),
+        # `PR-20.4`: the live house is at (3086,3258); the old box (y<=3245) described the fishing
+        # pier and therefore ACCEPTED a node 26 tiles away from Aggie.
+        ("DRAYNOR_AGGIE", 3070, 3105, 3245, 3275),
         ("FALADOR_PARK", 2985, 3015, 3360, 3390),
         ("VARROCK_CADAVA_BUSHES", 3255, 3285, 3355, 3385),
         # `PR-20.3`: live probe puts the two bushes at (3272,3375) & (3277,3371); the old rectangle

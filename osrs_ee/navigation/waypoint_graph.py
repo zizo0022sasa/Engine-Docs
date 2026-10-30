@@ -140,7 +140,10 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "MILL_LANE_WHEAT_FIELD": WorldPoint(3162, 3296, 0, "MILL_LANE_WHEAT_FIELD"),
     "MILL_LANE_MILL": WorldPoint(3166, 3302, 0, "MILL_LANE_MILL"),
     "LUMBRIDGE_WINDMILL_TOP": WorldPoint(3164, 3307, 2, "LUMBRIDGE_WINDMILL_TOP"),
-    "DRAYNOR_AGGIE": WorldPoint(3087, 3232, 0, "DRAYNOR_AGGIE"),
+    # `PR-20.4` FIELD-PROVEN (live probe on 8081): Aggie is NPC `120` standing at `(3088,3259)`;
+    # her doorstep tile is `(3086,3258)`. The old node `(3087,3232)` was 26 tiles SOUTH at the
+    # Draynor fishing pier — the bot talked to empty air at the water's edge.
+    "DRAYNOR_AGGIE": WorldPoint(3086, 3258, 0, "DRAYNOR_AGGIE"),
     "FALADOR_PARK": WorldPoint(3000, 3375, 0, "FALADOR_PARK"),
     "VARROCK_CADAVA_BUSHES": WorldPoint(3268, 3368, 0, "VARROCK_CADAVA_BUSHES"),  # pins 3264..3277
     # `PR-20.3` FIELD-PROVEN (live probe `GET /objects?name=Redberry bush` on 8081):
@@ -431,7 +434,8 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "edge_id": "supply_draynor_bank_to_aggie",
             "src": "DRAYNOR_BANK",
             "dst": "DRAYNOR_AGGIE",
-            "cost_tiles": 16.0,
+            # `PR-20.4`: (3092,3245) -> (3086,3258) is chebyshev 13.
+            "cost_tiles": 13.0,
         },
         {
             "edge_id": "supply_falador_east_to_park",

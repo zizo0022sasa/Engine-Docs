@@ -69,6 +69,8 @@ VERIFIED_QUEST_DIALOGUE_OPTIONS: tuple[str, ...] = (
     "Talk about Romeo & Juliet.",
     "Ok, thanks.",
     # Goblin Diplomacy
+    # `PR-20.4` LIVE VERBATIM (Aggie's dye menu, confirmed on screen during the field run):
+    "What could you make for me?",
     "Do you want me to pick an armour colour for you?",
     "What about a different colour?",
     "Yes, he looks fat.",
@@ -222,7 +224,10 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             ORANGE_GOBLIN_MAIL_ID, BLUE_GOBLIN_MAIL_ID, COINS_ID,
         }
 
-    COIN_FLOAT_GP = 512
+    # `PR-20.4`: the dye budget is exactly what the quest costs — 20 GP for Wyson's woad leaves plus
+    # 5 GP for each of Aggie's three dyes. A 512 GP lump made the bot trek to the bank for money it
+    # did not need yet; the float is now demand-driven and only requested when the goblin stage runs.
+    COIN_FLOAT_GP = GOBLIN_DYE_BUDGET_GP = 20 + 5 * 3
 
     @staticmethod
     def _needed_wool(sheep_state: int) -> int:
@@ -247,10 +252,12 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         """
         if self._coin_float_resolved:
             return None
-        if _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False) >= self.COIN_FLOAT_GP:
+        held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
+        if held >= self.COIN_FLOAT_GP:
             self._coin_float_resolved = True
             return None
-        directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP, "Coins")
+        # Only top up what is actually missing (a bot that already earned Fred's 60 GP needs nothing).
+        directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP - held, "Coins")
         if directive is None:
             self._coin_float_resolved = True
             return None
@@ -266,9 +273,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             return None
         # `PR-19.4`: everything the cascade needs (bank audit included) lives on the surface, so an
         # underground start must first leave through an AUTHORIZED exit instead of walking across the map.
-        # `PR-20`: EXCEPT when this very item is produced underground (the Lumbridge cellar bucket);
-        # forcing an exit first made the bot descend and get marched straight back out, forever.
-        if not self.supply.recipe_is_underground(item_id):
+        # `PR-20`/`PR-20.4`: EXCEPT when this tick genuinely has to be spent underground (the
+        # Lumbridge cellar bucket); forcing an exit first made the bot descend and get marched
+        # straight back out, forever. The exemption is situational — `needs_descent_now` — so a bot
+        # in the cellar whose bucket is already in the bag still leaves through the authorized exit.
+        if not self.supply.needs_descent_now(ctx, item_id):
             underground_exit = self._authorize_exit_if_underground(ctx, label)
             if underground_exit is not None:
                 return underground_exit
@@ -325,6 +334,11 @@ class TradeUnlockQuestsTaskModule(TaskModule):
 
     def _prepare_goblin_diplomacy_supplies(self, ctx: TickContext) -> TaskDirective | None:
         """Zero-Touch Goblin Diplomacy staging: 1 blue mail + 1 orange mail + 1 plain brown mail."""
+        # `PR-20.4`: the coin float belongs HERE — the only stage that spends money. Doing it at the
+        # top of the bundle sent the bot on a bank trek before it had done any quest work.
+        coin_float = self._ensure_coin_float(ctx)
+        if coin_float is not None:
+            return coin_float
         # Verified wire order (T68): Orange dye on Goblin mail FIRST, then Blue dye -> [1769, 288, 1767, 288].
         for item_id, label in (
             (ORANGE_GOBLIN_MAIL_ID, "Orange goblin mail"),
@@ -458,13 +472,7 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 reason=f"Stage 1A Quest Bundle completed (QP={ctx.quest_points}) and anchored at {self.anchor_bank_node}",
             )
 
-        # 2. Zero-Touch coin float (`PR-20`): one withdrawal at the anchor bank covers every dye.
-        if not all_four_done:
-            float_directive = self._ensure_coin_float(ctx)
-            if float_directive is not None:
-                return float_directive
-
-        # 3. Quest 1: Cook's Assistant (1 QP)
+        # 2. Quest 1: Cook's Assistant (1 QP)
         if cook_state < 2:
             if cook_state == 0:
                 prep = self._ensure_supplies_at_anchor(
