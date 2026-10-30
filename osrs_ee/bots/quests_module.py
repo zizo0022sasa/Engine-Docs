@@ -113,9 +113,10 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         self._coin_earn_attempts = 0
         # `PR-20.8`: where the bot is currently earning, its best purse seen, and its strike count —
         # a rejected pickpocket looks exactly like an unlucky one unless the purse is watched.
-        self._coin_earn_node: str | None = None
         self._coin_best_gp = -1  # -1 = "no baseline observed yet" (0 is a legitimate purse)
         self._coin_no_progress = 0
+        # `PR-20.9`: game tick of the last issued attempt — the stun window must expire first.
+        self._coin_earn_last_tick: int | None = None
         # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
         # run*, never on QP the account already carried from earlier stages.
         self._baseline_quest_points: int | None = None
@@ -325,9 +326,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             # behaviour — give up and let the dye step escalate — left an entirely able account
             # blocked for want of 30 GP. The bot now EARNS the money the way a player would.
             self._coin_earning = True
-            self._coin_earn_node = None
             self._coin_best_gp = held
             self._coin_no_progress = 0
+            self._coin_earn_last_tick = None
             return self._earn_coins(ctx)
         return directive
 
@@ -340,46 +341,37 @@ class TradeUnlockQuestsTaskModule(TaskModule):
     COIN_EARN_ATTEMPT_CAP = 80
     # `PR-20.8` FIELD FIX (incident #13): `PR-20.7` assumed Draynor village was full of citizens. The
     # live `GET /npcs?maxDistance=30` census says otherwise — Draynor holds Bankers, Bank guard, Wise
-    # Old Man, Miss Schism, Ned, Aggie, Dianto/Fortunato and NOT ONE `Man`/`Woman`, so every attempt
-    # came back `{"success": false, "reason": "NPC not found"}`. The Lumbridge castle courtyard is the
-    # field-confirmed citizen hub (level-2 `Man`/`Woman`, zero risk for a level-3 account), and it is
-    # already a graph node with edges to the kitchen, the sheep farm and the north stairs.
-    COIN_EARN_NODES: tuple[str, ...] = ("LUMBRIDGE_CASTLE_COURTYARD", "VARROCK_SQUARE")
+    # Old Man, Miss Schism, Ned, Aggie, Diango, Fortunato and NOT ONE `Man`/`Woman`, so every attempt
+    # came back `{"success": false, "reason": "NPC not found"}`.
+    #
+    # `PR-20.9` FIELD FIX (incident #14): the courtyard was RIGHT — the live census found 6 men and 3
+    # women, nearest one tile away — but `PR-20.8` then relocated to `VARROCK_SQUARE` anyway, walking a
+    # level-3 account through the dark-wizard corridor. The fallback is GONE: one field-confirmed hub,
+    # and the engine reports instead of wandering. (Varrock square is a fine hub for a level-30
+    # account; it is not one for this account, and the engine may not gamble the character to prove a
+    # point.)
+    COIN_EARN_NODE = "LUMBRIDGE_CASTLE_COURTYARD"
     PICKPOCKET_TARGETS: tuple[str, ...] = ("Man", "Woman")
     COIN_EARN_RADIUS = 12
-    # `PR-20.8` — the deeper defect: a REJECTED pickpocket and an unlucky one look identical to the
-    # engine, so `PR-20.7` happily burned all 80 attempts against an NPC that was never there and
-    # would have escalated after ~80 silent ticks. Six fruitless attempts is enough to prove the
-    # target is wrong, not unlucky.
+    # `PR-20.9` — THE fix for incident #14. A failed pickpocket STUNS the player for ~3.0s (5 game
+    # ticks) with the little birds circling, and during the stun the game refuses every further
+    # attempt. `PR-20.8` fired one attempt per tick, so six "strikes" were really ONE failure plus five
+    # interactions swallowed by the stun — the engine concluded the courtyard was barren and marched
+    # 250 tiles to Varrock on the strength of a single unlucky roll. Space the attempts.
+    COIN_EARN_SETTLE_TICKS = 5
+    # `PR-20.8`: a REJECTED pickpocket and an unlucky one look identical to a counter, so the purse is
+    # watched instead. With the stun now respected, six genuinely fruitless attempts is enough evidence
+    # that the target is wrong (0.5^6 ~ 1.6% false alarm) — and the response is a report, never a trek.
     COIN_EARN_NO_PROGRESS_LIMIT = 6
 
-    def _nearest_earn_node(self, ctx: TickContext) -> str:
-        """Closest field-confirmed citizen hub (`PR-20.8`) — the bot earns where it already is."""
-        best, best_distance = self.COIN_EARN_NODES[0], float("inf")
-        for node_id in self.COIN_EARN_NODES:
-            node = DEFAULT_WORLD_NODES.get(node_id)
-            if node is None or node.plane != ctx.position.plane:
-                continue
-            distance = float(ctx.position.chebyshev_distance(node))
-            if distance < best_distance:
-                best, best_distance = node_id, distance
-        return best
-
-    def _next_earn_node(self, current: str) -> str | None:
-        """Advance to the next candidate hub, or `None` when they are all exhausted list."""
-        try:
-            index = self.COIN_EARN_NODES.index(current)
-        except ValueError:
-            return None
-        nxt = index + 1
-        return self.COIN_EARN_NODES[nxt] if nxt < len(self.COIN_EARN_NODES) else None
-
     def _earn_coins(self, ctx: TickContext) -> TaskDirective | None:
-        """Earn the missing dye budget in-world (`PR-20.7`), one pickpocket tick at a time.
+        """Earn the missing dye budget in-world (`PR-20.7`), one PACED pickpocket at a time.
 
-        `PR-20.8` adds the two things the live run proved missing: an honest location (Lumbridge
-        courtyard, not citizenship-free Draynor) and, more importantly, **progress awareness** — a
-        rejected interaction must not be mistaken for bad luck.
+        Three field incidents shaped this method:
+          * `#13` — the location was a guess; it is now the field-censused Lumbridge courtyard.
+          * `#13` — a rejected interaction is not an unlucky one; the purse is watched, not the call.
+          * `#14` — an unlucky one is not a barren one either: the stun must expire before the next
+            attempt, or one bad roll is amplified into "this place has no money".
         """
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
@@ -388,14 +380,22 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             self._coin_earn_attempts = 0
             self._coin_no_progress = 0
             self._coin_best_gp = -1
+            self._coin_earn_last_tick = None
             return None
-        # Progress watch: ANY new GP resets the strike count, silence is evidence. The FIRST
-        # observation only establishes the baseline — adopting it must not wipe strikes already earned.
+        # Progress watch: ANY new GP resets the strike count; silence is evidence, but only once the
+        # stun has been given time to end. The FIRST observation only establishes the baseline —
+        # adopting it must not wipe strikes already earned.
         if self._coin_best_gp < 0:
             self._coin_best_gp = held
         elif held > self._coin_best_gp:
             self._coin_best_gp = held
             self._coin_no_progress = 0
+        # The safety layer owns a danger tick: never start a new crime while IN_DANGER.
+        if ctx.in_danger:
+            return TaskDirective(
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
+                reason=f"Zero-Touch earnings: holding ({held}/{self.COIN_FLOAT_GP} GP) until safe",
+            )
         if self._coin_earn_attempts >= self.COIN_EARN_ATTEMPT_CAP:
             self._coin_float_unavailable = True
             self._coin_earning = False
@@ -403,31 +403,28 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 directive_type=DirectiveType.ESCALATE_HUMAN,
                 reason=f"SUPPLY_UNSOURCED:Coins:pickpocket_exhausted({self._coin_earn_attempts})",
             )
-        node_id = self._coin_earn_node or self._nearest_earn_node(ctx)
-        if self._coin_no_progress >= self.COIN_EARN_NO_PROGRESS_LIMIT:
-            # Six silent interactions: the target set is wrong, not unlucky. Relocate ONCE, then
-            # report the exact hub instead of burning the rest of the budget in silence.
-            nxt = self._next_earn_node(node_id)
-            if nxt is None:
-                self._coin_float_unavailable = True
-                self._coin_earning = False
-                return TaskDirective(
-                    directive_type=DirectiveType.ESCALATE_HUMAN,
-                    reason=f"SUPPLY_UNSOURCED:Coins:no_progress({node_id})",
-                )
-            self._coin_no_progress = 0
-            self._coin_earn_node = nxt
-            self._coin_best_gp = held
+        # Action grace (`PR-20.9`): one attempt per stun window, and a waiting tick is NOT a strike.
+        if (
+            self._coin_earn_last_tick is not None
+            and int(ctx.game_tick) - int(self._coin_earn_last_tick) < self.COIN_EARN_SETTLE_TICKS
+        ):
             return TaskDirective(
-                directive_type=DirectiveType.NAVIGATE_TO,
-                destination=nxt,
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
                 reason=(
-                    f"Zero-Touch earnings: no coins from {node_id} in "
-                    f"{self.COIN_EARN_NO_PROGRESS_LIMIT} attempts; relocating to {nxt}"
+                    f"Zero-Touch earnings: letting the pickpocket stun expire "
+                    f"({int(ctx.game_tick) - int(self._coin_earn_last_tick)}/{self.COIN_EARN_SETTLE_TICKS} ticks)"
                 ),
             )
-        self._coin_earn_node = node_id
-        node = DEFAULT_WORLD_NODES.get(node_id)
+        if self._coin_no_progress >= self.COIN_EARN_NO_PROGRESS_LIMIT:
+            # Six genuinely silent attempts at the field-confirmed hub: report it and stop. The bot
+            # never walks to another town to prove a point with a level-3 character.
+            self._coin_float_unavailable = True
+            self._coin_earning = False
+            return TaskDirective(
+                directive_type=DirectiveType.ESCALATE_HUMAN,
+                reason=f"SUPPLY_UNSOURCED:Coins:no_progress({self.COIN_EARN_NODE})",
+            )
+        node = DEFAULT_WORLD_NODES.get(self.COIN_EARN_NODE)
         if (
             node is not None
             and ctx.position.plane == 0
@@ -435,20 +432,21 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         ):
             return TaskDirective(
                 directive_type=DirectiveType.NAVIGATE_TO,
-                destination=node_id,
+                destination=self.COIN_EARN_NODE,
                 reason=(
-                    f"Zero-Touch earnings: walking to {node_id} to earn "
+                    f"Zero-Touch earnings: walking to {self.COIN_EARN_NODE} to earn "
                     f"{self.COIN_FLOAT_GP - held} GP more"
                 ),
             )
         target = self.PICKPOCKET_TARGETS[self._coin_earn_attempts % len(self.PICKPOCKET_TARGETS)]
         self._coin_earn_attempts += 1
         self._coin_no_progress += 1
+        self._coin_earn_last_tick = int(ctx.game_tick)
         return TaskDirective(
             directive_type=DirectiveType.INTERACT_NPC,
             payload={"name": target, "action": "Pickpocket"},
             reason=(
-                f"Zero-Touch earnings: pickpocketing {target} at {node_id} "
+                f"Zero-Touch earnings: pickpocketing {target} at {self.COIN_EARN_NODE} "
                 f"({held}/{self.COIN_FLOAT_GP} GP, attempt {self._coin_earn_attempts})"
             ),
         )

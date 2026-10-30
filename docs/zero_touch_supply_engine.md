@@ -1193,3 +1193,81 @@ Relocating does **not** consume the pickpocket budget, and the baseline purse is
 | `T155` | one successful pickpocket clears five strikes (bad luck ≠ wrong target) |
 
 Full suite: **`163 passed`** (`T01..T155`), `0 failed`.
+
+---
+
+## 24. `PR-20.9` — Incident #14: an unlucky roll is not a barren courtyard
+
+### 24.1 The live log (eight ticks that cost a 250-tile march)
+
+```
+[tick=0002] dir=INTERACT_NPC | pickpocketing Man at LUMBRIDGE_CASTLE_COURTYARD (0/35 GP, attempt 1)
+[tick=0003] dir=INTERACT_NPC | pickpocketing Woman at LUMBRIDGE_CASTLE_COURTYARD (0/35 GP, attempt 2)
+[tick=0004] state=IN_DANGER | ... attempt 3
+[tick=0005] state=IN_DANGER | ... attempt 4
+[tick=0006] state=IN_DANGER | ... attempt 5
+[tick=0007] state=IN_DANGER | ... attempt 6
+[tick=0008] dir=NAVIGATE_TO | no coins from LUMBRIDGE_CASTLE_COURTYARD in 6 attempts; relocating to VARROCK_SQUARE
+```
+
+The location was **right** this time: the live census found **6 men and 3 women**, the nearest one tile
+away, at `(3219,3219)`.
+
+### 24.2 The game rule the engine ignored
+
+A **failed** pickpocket stuns the player for about **3.0 seconds (5 game ticks)** — the little birds
+circling the head — and during the stun the client refuses any further attempt.
+
+`PR-20.8` issued one attempt **per tick**. So the six "strikes" were really **one unlucky roll plus
+five interactions swallowed by the stun**, all inside 3.6 seconds. The engine then reasoned: *six
+attempts, zero coins, this place is barren* — and marched a level-3 character 250 tiles to Varrock
+square, through the dark-wizard corridor.
+
+This is the **third** member of one family, and the family is the point:
+
+| incident | the engine confused | with |
+|---|---|---|
+| `#10` | "started" (`Varp 62 = 1`) | "finished" |
+| `#13` | "refused" (`NPC not found`) | "unlucky" |
+| `#14` | "unlucky" | "barren" — and acted on it with a trek |
+
+Every one of them is the same original sin: **trusting the call was sent instead of measuring the
+world**.
+
+### 24.3 The fix
+
+```python
+COIN_EARN_SETTLE_TICKS = 5     # the stun window; one attempt per window
+COIN_EARN_NODE = "LUMBRIDGE_CASTLE_COURTYARD"   # single field-confirmed hub
+```
+
+* **Action grace.** After each attempt the bot emits `WAIT_NEXT_TICK` for the rest of the window. A
+  waiting tick is **not** a strike — `_coin_no_progress` only moves when an attempt is actually issued.
+  The wait reason carries the countdown (`letting the pickpocket stun expire (2/5 ticks)`) so an
+  operator can see the pacing working.
+* **No dangerous fallback.** `COIN_EARN_NODES` is gone; `VARROCK_SQUARE` was removed deliberately. If
+  the courtyard is genuinely barren after six *fairly spaced* attempts, the engine reports
+  `SUPPLY_UNSOURCED:Coins:no_progress(LUMBRIDGE_CASTLE_COURTYARD)` — one line, zero walking. Varrock
+  square is a fine hub for a level-30 account; it is not one for this account, and the engine may not
+  gamble the character to avoid admitting defeat.
+* **Danger is not yours to override.** While `ctx.in_danger` the earning loop holds
+  (`WAIT_NEXT_TICK`, no attempt, no strike) and the safety layer owns the tick. The live log issued
+  pickpockets through five consecutive `IN_DANGER` ticks.
+
+### 24.4 What the false-alarm budget now is
+
+With the stun respected, six consecutive genuinely-failed pickpockets happen with probability
+`~0.5^6 ≈ 1.6%` at level 1 — and the consequence is a **safe stop with a precise reason**, not a trek.
+That is the right trade: a stopped bot is recoverable in one operator command, a dead one is not.
+
+### 24.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T152` | single field-confirmed hub; Varrock excluded; `COIN_EARN_NODES` no longer exists |
+| `T153` | attempts are paced by the stun window; a waiting tick adds no strike |
+| `T154` | a barren hub reports `no_progress(LUMBRIDGE_CASTLE_COURTYARD)` and disarms — never a trek |
+| `T155` | one successful pickpocket clears five strikes |
+| `T156` | an `IN_DANGER` tick never starts a new pickpocket and never burns a strike |
+
+Full suite: **`164 passed`** (`T01..T156`), `0 failed`.

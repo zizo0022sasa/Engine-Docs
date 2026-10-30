@@ -51,12 +51,18 @@ LIVE_EMPTY_BANK = {
 }
 
 
-def _ctx(position=DRAYNOR_BANK, *, coins: int, extra: tuple[dict[str, Any], ...] = ()) -> TickContext:
+def _ctx(
+    position=DRAYNOR_BANK,
+    *,
+    coins: int,
+    tick: int = 40,
+    extra: tuple[dict[str, Any], ...] = (),
+) -> TickContext:
     inventory: list[dict[str, Any]] = list(extra)
     if coins:
         inventory.append({"item_id": COINS_ID, "name": "Coins", "quantity": coins})
     return TickContext(
-        game_tick=40,
+        game_tick=tick,
         position=position,
         capabilities=AccountCapabilitiesContext("acc_02", skills={"hitpoints": 10}, combat_level=3),
         inventory_items=tuple(inventory),
@@ -88,7 +94,7 @@ def test_t147_an_empty_bank_makes_the_bot_earn_instead_of_escalating() -> None:
     # `PR-20.8`: from the bank the first earning directive is the walk to the citizen hub.
     assert directive.directive_type in (DirectiveType.INTERACT_NPC, DirectiveType.NAVIGATE_TO), directive
     if directive.directive_type == DirectiveType.NAVIGATE_TO:
-        assert directive.destination in TradeUnlockQuestsTaskModule.COIN_EARN_NODES, directive.destination
+        assert directive.destination == TradeUnlockQuestsTaskModule.COIN_EARN_NODE, directive.destination
     else:
         assert directive.payload["action"] == "Pickpocket"
     assert bot._coin_earning is True
@@ -106,10 +112,11 @@ def test_t148_earning_uses_the_proven_npc_shape_and_stops_when_the_purse_is_whol
 
     # `PR-20.8`: standing IN the courtyard — a rejected pickpocket looks like an unlucky one, so the
     # strike counter must stay below the limit for these six successful-shape attempts.
-    courtyard = _ctx(COURTYARD, coins=1)
     seen_actions = set()
     seen_names = set()
-    for _ in range(6):
+    for i in range(6):
+        # `PR-20.9`: the stun must expire between attempts, so the clock advances a full window.
+        courtyard = _ctx(COURTYARD, coins=1, tick=40 + i * TradeUnlockQuestsTaskModule.COIN_EARN_SETTLE_TICKS)
         directive = bot._earn_coins(courtyard)
         assert directive.directive_type == DirectiveType.INTERACT_NPC
         seen_actions.add(directive.payload["action"])
@@ -158,23 +165,31 @@ def test_t150_zero_gp_to_a_funded_purse_with_no_operator_involvement() -> None:
     ticks = 0
     pickpockets = 0
     position = DRAYNOR_BANK  # the live starting point: inside the Draynor bank
-    while coins < TradeUnlockQuestsTaskModule.COIN_FLOAT_GP and ticks < 200:
+    tick = 40
+    while coins < TradeUnlockQuestsTaskModule.COIN_FLOAT_GP and ticks < 400:
         ticks += 1
-        directive = bot._ensure_coin_float(_ctx(position, coins=coins))
+        tick += 1
+        directive = bot._ensure_coin_float(_ctx(position, coins=coins, tick=tick))
         if directive is None:
             break
         if directive.directive_type == DirectiveType.INTERACT_NPC:
             pickpockets += 1
             coins += 3  # a successful pickpocket from a citizen
         elif directive.directive_type == DirectiveType.NAVIGATE_TO:
-            assert directive.destination in TradeUnlockQuestsTaskModule.COIN_EARN_NODES, directive.destination
+            assert directive.destination == TradeUnlockQuestsTaskModule.COIN_EARN_NODE, directive.destination
             position = DEFAULT_WORLD_NODES[directive.destination]  # one tick to arrive
+        elif directive.directive_type == DirectiveType.WAIT_NEXT_TICK:
+            pass  # `PR-20.9`: the stun window; legitimate and free of strikes
         else:  # pragma: no cover - any other directive is a defect in this scenario
             raise AssertionError(f"unexpected directive {directive.directive_type}: {directive.reason}")
 
     assert coins >= TradeUnlockQuestsTaskModule.COIN_FLOAT_GP, f"only reached {coins} GP"
     assert pickpockets == 12, f"1 + 12*3 = 37 GP boundary, got {pickpockets}"
-    assert ticks < 200
+    # `PR-20.9`: twelve attempts need eleven full stun windows between them (the first needs no wait).
+    settle = TradeUnlockQuestsTaskModule.COIN_EARN_SETTLE_TICKS
+    assert ticks >= (pickpockets - 1) * settle, f"{ticks} ticks for {pickpockets} attempts"
+    # ...and the pacing is real: ~3s of wall clock per attempt, not one per tick.
+    assert ticks > pickpockets * 3, ticks
     # The purse exists ONLY because the bot earned it: nothing was withdrawn.
     assert bot._bank_stock.get(COINS_ID, 0) == 0
     # ...and it is now spendable on the dye budget (5 yellow + 20 woad + 5 blue = 30).
@@ -228,12 +243,13 @@ def test_t152_earning_happens_in_the_field_confirmed_citizen_hub() -> None:
     """T152 (`PR-20.8`): the live `GET /npcs?maxDistance=30` census showed Draynor holds NO `Man` or
     `Woman`, so `PR-20.7` fired 80 doomed pickpockets. The earning hubs must now be the courtyard and
     Varrock square — both real graph nodes the router can already reach."""
-    hubs = TradeUnlockQuestsTaskModule.COIN_EARN_NODES
-    assert hubs[0] == "LUMBRIDGE_CASTLE_COURTYARD", hubs
-    assert "DRAYNOR_BANK" not in hubs, "the live census proved Draynor has no citizens to rob"
-    for node_id in hubs:
-        assert node_id in DEFAULT_WORLD_NODES, f"{node_id} must be routable"
-        assert DEFAULT_WORLD_NODES[node_id].plane == 0
+    node_id = TradeUnlockQuestsTaskModule.COIN_EARN_NODE
+    assert node_id == "LUMBRIDGE_CASTLE_COURTYARD", node_id
+    assert node_id != "DRAYNOR_BANK", "the live census proved Draynor has no citizens to rob"
+    # `PR-20.9`: the Varrock fallback is GONE — it walked a level-3 account through the wizard corridor.
+    assert not hasattr(TradeUnlockQuestsTaskModule, "COIN_EARN_NODES"), "single field-confirmed hub"
+    assert node_id in DEFAULT_WORLD_NODES, f"{node_id} must be routable"
+    assert DEFAULT_WORLD_NODES[node_id].plane == 0
 
     # From the bank the bot walks to the courtyard (it does not pickpocket thin air in Draynor).
     bot = _bot()
@@ -243,48 +259,82 @@ def test_t152_earning_happens_in_the_field_confirmed_citizen_hub() -> None:
     assert directive.destination == "LUMBRIDGE_CASTLE_COURTYARD"
 
 
-def test_t153_six_rejected_pickpockets_relocate_instead_of_burning_the_whole_budget() -> None:
-    """T153 (`PR-20.8`): the engine-level defect behind incident #13 — a REJECTED interaction
-    (`{"success": false, "reason": "NPC not found"}`) is indistinguishable from an unlucky one unless
-    the purse is watched. Six silent attempts must relocate the bot, not sail on to the 80 cap."""
+def test_t153_attempts_are_paced_by_the_stun_window_and_a_wait_is_not_a_strike() -> None:
+    """T153 (`PR-20.9`): incident #14 in one assertion. A failed pickpocket stuns for ~3s (5 ticks),
+    and the game refuses every attempt inside that window. `PR-20.8` fired one attempt PER TICK, so a
+    single unlucky roll became six "silent strikes" in 3.6 seconds and a 250-tile march to Varrock."""
+    settle = TradeUnlockQuestsTaskModule.COIN_EARN_SETTLE_TICKS
+    assert settle >= 5, "a stun is ~3.0s; 5 game ticks at minimum"
+
     bot = _bot()
     bot._coin_earning = True
+    t0 = 100
+    first = bot._earn_coins(_ctx(COURTYARD, coins=1, tick=t0))
+    assert first.directive_type == DirectiveType.INTERACT_NPC
+    assert bot._coin_no_progress == 1
 
-    issued = 0
-    directive = None
-    for _ in range(TradeUnlockQuestsTaskModule.COIN_EARN_NO_PROGRESS_LIMIT):
-        directive = bot._earn_coins(_ctx(COURTYARD, coins=1))  # purse NEVER grows: all rejected
-        assert directive.directive_type == DirectiveType.INTERACT_NPC, directive
-        issued += 1
+    # Every tick inside the stun must HOLD, not pickpocket, and must not add a strike.
+    for offset in range(1, settle):
+        held = bot._earn_coins(_ctx(COURTYARD, coins=1, tick=t0 + offset))
+        assert held.directive_type == DirectiveType.WAIT_NEXT_TICK, (offset, held)
+        assert bot._coin_no_progress == 1, "a waiting tick is not a silent attempt"
+        assert bot._coin_earn_attempts == 1
 
-    assert issued == 6
-    assert bot._coin_no_progress == 6
+    # The window expires -> exactly one new attempt is allowed.
+    nxt = bot._earn_coins(_ctx(COURTYARD, coins=1, tick=t0 + settle))
+    assert nxt.directive_type == DirectiveType.INTERACT_NPC
+    assert bot._coin_earn_attempts == 2
 
-    # The next tick must RELOCATE, not pickpocket a seventh time.
+    # Six strikes therefore span six full windows — never six ticks.
+    assert 6 * settle > 6, "the whole incident was that these were the same number"
+
+
+def test_t154_a_barren_hub_is_reported_and_never_answered_with_a_trek_to_varrock() -> None:
+    """T154 (`PR-20.9`): with the single field-confirmed hub silent, the engine must STOP and name it.
+    The `PR-20.8` fallback sent a level-3 account to Varrock square — through the dark wizards — to
+    avoid admitting defeat."""
+    bot = _bot()
+    bot._coin_earning = True
+    bot._coin_no_progress = TradeUnlockQuestsTaskModule.COIN_EARN_NO_PROGRESS_LIMIT
+    bot._coin_earn_last_tick = None
+
     directive = bot._earn_coins(_ctx(COURTYARD, coins=1))
     assert directive is not None
-    assert directive.directive_type == DirectiveType.NAVIGATE_TO, directive
-    assert directive.destination == "VARROCK_SQUARE"
-    assert bot._coin_earn_attempts == 6, "relocating must not consume the pickpocket budget"
-    assert bot._coin_no_progress == 0
-
-
-def test_t154_exhausting_every_hub_reports_the_exact_place_instead_of_hanging() -> None:
-    """T154 (`PR-20.8`): with the last hub also silent, the engine stops and names it —
-    `SUPPLY_UNSOURCED:Coins:no_progress(<node>)` — so the next field report is one line, not 80."""
-    bot = _bot()
-    bot._coin_earning = True
-    bot._coin_earn_node = TradeUnlockQuestsTaskModule.COIN_EARN_NODES[-1]
-    bot._coin_no_progress = TradeUnlockQuestsTaskModule.COIN_EARN_NO_PROGRESS_LIMIT
-
-    directive = bot._earn_coins(_ctx(DEFAULT_WORLD_NODES["VARROCK_SQUARE"], coins=1))
-    assert directive is not None
-    assert directive.directive_type == DirectiveType.ESCALATE_HUMAN
-    assert directive.reason == "SUPPLY_UNSOURCED:Coins:no_progress(VARROCK_SQUARE)", directive.reason
+    assert directive.directive_type == DirectiveType.ESCALATE_HUMAN, directive
+    assert directive.reason == "SUPPLY_UNSOURCED:Coins:no_progress(LUMBRIDGE_CASTLE_COURTYARD)", directive.reason
     assert bot._coin_float_unavailable is True
 
-    # Disarmed: the bot stops trying instead of pickpocketing forever.
+    # Disarmed: the bot stops instead of earning forever or walking anywhere dangerous.
     assert bot._ensure_coin_float(_ctx(COURTYARD, coins=1)) is None
+
+
+def test_t156_a_danger_tick_never_starts_a_new_pickpocket() -> None:
+    """T156 (`PR-20.9`): the live log showed `state=IN_DANGER` for five consecutive ticks while the
+    engine kept issuing pickpockets. The safety layer owns a danger tick; the earning loop must hold
+    without burning an attempt or a strike."""
+    bot = _bot()
+    bot._coin_earning = True
+
+    dangerous = TickContext(
+        game_tick=200,
+        position=COURTYARD,
+        capabilities=AccountCapabilitiesContext("acc_02", skills={"hitpoints": 6}, combat_level=3),
+        inventory_items=({"item_id": COINS_ID, "name": "Coins", "quantity": 1},),
+        varps=GOBLIN_STAGE,
+        quest_points=8,
+        total_level=40,
+        in_danger=True,
+    )
+    directive = bot._earn_coins(dangerous)
+    assert directive is not None
+    assert directive.directive_type == DirectiveType.WAIT_NEXT_TICK, directive
+    assert bot._coin_earn_attempts == 0
+    assert bot._coin_no_progress == 0
+    assert "holding" in directive.reason
+
+    # Once safe, the very next tick resumes normally.
+    safe = bot._earn_coins(_ctx(COURTYARD, coins=1, tick=201))
+    assert safe.directive_type == DirectiveType.INTERACT_NPC
 
 
 def test_t155_progress_resets_the_strike_counter() -> None:
@@ -292,11 +342,12 @@ def test_t155_progress_resets_the_strike_counter() -> None:
     counter must reset on ANY new GP, or a slow-but-working hub would be abandoned."""
     bot = _bot()
     bot._coin_earning = True
-    for _ in range(TradeUnlockQuestsTaskModule.COIN_EARN_NO_PROGRESS_LIMIT - 1):
-        bot._earn_coins(_ctx(COURTYARD, coins=1))
+    settle = TradeUnlockQuestsTaskModule.COIN_EARN_SETTLE_TICKS
+    for i in range(TradeUnlockQuestsTaskModule.COIN_EARN_NO_PROGRESS_LIMIT - 1):
+        bot._earn_coins(_ctx(COURTYARD, coins=1, tick=300 + i * settle))
     assert bot._coin_no_progress == 5
 
-    bot._earn_coins(_ctx(COURTYARD, coins=4))  # one citizen paid out
+    bot._earn_coins(_ctx(COURTYARD, coins=4, tick=300 + 5 * settle))  # one citizen paid out
     assert bot._coin_best_gp == 4
     # The five strikes are gone; only the fresh attempt issued on this tick counts.
     assert bot._coin_no_progress == 1, "a successful pickpocket must clear the strikes"
