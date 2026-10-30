@@ -1436,3 +1436,76 @@ that and `T161` caught it.
 | `T164` | `COMPLETE_TASK` payload and reason both carry the tag |
 
 Full suite: **`163 passed`**, `0 failed` (`T01..T146`, `T157..T164`).
+
+---
+
+## 27. Fleet triage — two accounts, two different verdicts
+
+### 27.1 The decision
+
+| account | role | required verdict |
+|---|---|---|
+| `acc_01` (`[GAME-02]`, clean) | **the acceptance run** — first | `[funding=ZERO_TOUCH]` |
+| `acc_02` (`[GAME-01]`, damaged) | the trophy run — second | `[funding=OPERATOR_FUNDED_RECOVERY]` |
+
+Run the **clean** account first. Not for ceremony: `PR-21.1` makes provenance mechanical, and only
+`ZERO_TOUCH` proves the bundle works. A `RECOVERY` completion proves the *quest logic*; a `ZERO_TOUCH`
+completion proves the *system*. Doing the expensive proof first also means the operator's 50 GP becomes
+optional cleanup instead of a prerequisite.
+
+### 27.2 Three pre-flight facts from `state.db` (2026-10-30)
+
+1. **`acc_01` has never been scanned.**
+   `status = PENDING_DISCOVERY`, `stage = STAGE_0_TUTORIAL`, **`tutorial_varp_281 = NULL`**.
+
+   The quest bundle refuses to run below tutorial completion:
+   `PRECONDITION_FAILED_TUTORIAL_VARP_281_INCOMPLETE`. A `NULL` here is not "probably fine" — it is
+   **unknown**, and unknown must be measured before 3,000 ticks are committed to it.
+   → `scan-profile` first; if `varp 281 < 1000`, run `--recipe-id stage0_tutorial_island` first.
+
+2. **`acc_02`'s row is stale and contradicts the live census.**
+   The row (written `2026-10-28T04:10:30Z`) claims `quest_points = 10`, `total_level = 110`,
+   `stage = STAGE_3_F2P_SKILLING`; the live character reports **8 QP, total 40**. Two days of drift, and
+   a claim that was never probe-verified — the same failure mode as the "10,000 GP banked" line retired
+   in §25.4.
+
+   Nothing breaks: the QP latch is **baseline-relative** (`qp > baseline`), so a stale high value cannot
+   fake a completion. But `status`/`--status` output must not be used for decisions until re-scanned.
+
+3. **Port isolation is a safety rule, not housekeeping.**
+   `acc_02` is bound to **8081**. The adapter identifies the character by **port**, never by the
+   `--account-id` string. Launching a second client on 8081 means the engine drives whichever character
+   answers — while the ledger writes another account's name next to it. That is a *silent* cross-account
+   contamination, and it is exactly the class of bug that produces a false `LIVE_WIRE_VERIFIED`.
+
+   > **Rule: one character per port. `acc_01` → `8082` (slot 1). `acc_02` → `8081` (slot 0).**
+   > Never two clients on one port, and never re-use a port while its previous client is still logged in.
+
+### 27.3 The runbook
+
+```bash
+# 0. isolate: close acc_02's client, or leave it — but acc_01 MUST take 8082
+python -m osrs_ee live-probe   --port 8082 --account-id acc_01      # read-only handshake
+python -m osrs_ee scan-profile --port 8082 --account-id acc_01 --read-only
+#    -> check tutorial_varp_281 >= 1000 and the real QP/total level
+#    -> if varp 281 < 1000:  attach-bot --recipe-id stage0_tutorial_island --port 8082 --account-id acc_01
+
+python -m osrs_ee attach-bot --account-id acc_01 --recipe-id stage1a_f2p_quests_10qp \
+       --port 8082 --slot-id 1 --max-ticks 8000
+```
+
+Expected final line:
+
+```
+Stage 1A Quest Bundle completed (QP=13) and anchored at GRAND_EXCHANGE [funding=ZERO_TOUCH]
+```
+
+Budget honestly: a clean account has to shear **20 sheep**, spin **20 balls of wool**, run the
+flour/milk/egg chain and the cadava-berry trip before the dyes even start. This is **hours of game
+time**, not ten minutes. `--max-ticks 8000` is a ceiling, not an estimate.
+
+### 27.4 Credential hygiene, restated
+
+Account credentials, 2FA codes and mailboxes never enter this repository, `PROGRESS.md`, a commit
+message, or this transcript. The vault holds them (`vault://accounts/...`), and `credential_ref` is the
+only identifier any tracked file may carry.
