@@ -140,18 +140,23 @@ def test_t145_a_funded_bot_that_dies_asks_the_bank_again() -> None:
 # ---------------------------------------------------------------------------
 # T146 — anti-false-positive
 # ---------------------------------------------------------------------------
-def test_t146_an_account_with_no_coins_anywhere_escalates_precisely_and_stops() -> None:
-    """T146 (`PR-20.6`): if the bot's own economy holds no coins at all, the engine must NOT ping-pong
-    to the bank forever. It stops asking once (`_coin_float_unavailable`) and the precise
-    `SUPPLY_UNSOURCED:Coins` escalation fires at the step that needs the money."""
+def test_t146_an_account_with_no_coins_anywhere_never_ping_pongs_to_the_bank() -> None:
+    """T146 (`PR-20.6`, revised by `PR-20.7`): an account whose own economy holds no coins must NOT
+    trek between banks forever. `PR-20.6` stopped at "give up and escalate"; the live `GET /bank`
+    (six items, zero coins) proved that leaves an able account blocked, so `PR-20.7` earns the money
+    instead. The invariant this test defends is the ORIGINAL one: no repeated bank ping-pong."""
     bot = _bot(bank_stock={})  # empty bank: nothing to withdraw
     directive = bot._ensure_coin_float(_ctx(AGGIE_DOOR, coins=1))
-    assert directive is None
-    assert bot._coin_float_unavailable is True
+    assert directive is not None
+    # Never a bank trek with an empty vault — the bot funds itself where it stands.
+    assert directive.directive_type != DirectiveType.BANK_TURNAROUND, directive
+    assert directive.directive_type != DirectiveType.NAVIGATE_TO, directive
+    assert directive.directive_type == DirectiveType.INTERACT_NPC, directive
+    assert directive.payload["action"] == "Pickpocket"
+    assert bot._coin_float_unavailable is False, "earning is a real option, not an immediate surrender"
 
-    # It never asks again, and the dye economy reports the real blocker.
-    assert bot._ensure_coin_float(_ctx(AGGIE_DOOR, coins=1)) is None
-    escalate = bot._procure(_ctx(AGGIE_DOOR, coins=1), 1766, 2, "Woad leaves")  # WOAD_LEAF_ID
-    assert escalate is not None
-    assert escalate.directive_type == DirectiveType.ESCALATE_HUMAN
-    assert escalate.reason == "SUPPLY_UNSOURCED:Coins", escalate.reason
+    # The blocker is still reported honestly once earning is genuinely exhausted (T149).
+    bot._coin_earn_attempts = TradeUnlockQuestsTaskModule.COIN_EARN_ATTEMPT_CAP
+    escalate = bot._earn_coins(_ctx(AGGIE_DOOR, coins=1))
+    assert escalate is not None and escalate.directive_type == DirectiveType.ESCALATE_HUMAN
+    assert escalate.reason.startswith("SUPPLY_UNSOURCED:Coins"), escalate.reason

@@ -421,6 +421,16 @@ class FakeGameAdapter:
         if command_type in ("INTERACT_OBJECT", "INTERACT_NPC"):
             if self.interaction_grants is not None:
                 self.interaction_grants(command_type, dict(payload), self)
+            # `PR-20.7`: pickpocketing is a real world mechanic, so the FAKE must model it too —
+            # otherwise every hermetic pipeline burns the 80-attempt earning cap and stalls on
+            # `SUPPLY_UNSOURCED:Coins:pickpocket_exhausted`. Deliberately DETERMINISTIC (a successful
+            # citizen pickpocket yields 3 GP, no RNG): a fake proves the chain, never the dice.
+            if command_type == "INTERACT_NPC" and (
+                str(payload.get("action", "")).strip().casefold() == "pickpocket"
+            ):
+                self._add_to_inventory(
+                    {"item_id": 995, "name": "Coins", "quantity": 3, "noted": False}
+                )
             return {"ok": True}
 
         if command_type in ("DIALOGUE_SELECT", "DIALOGUE_CONTINUE"):

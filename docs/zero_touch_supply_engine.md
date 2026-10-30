@@ -988,11 +988,26 @@ the ground. Outstanding dye budget: `5 (yellow) + 20 (woad) + 5 (blue) = 30 GP`.
 | **Put 50 GP into the account / sell the bow+axe by hand at the shop** | ❌ **Rejected.** This is an operator hand-out and an operator mouse click — precisely what the ratified `Zero-Touch Invariant` forbids (`"⛔ نرفض الخيار (ب) والتدخل اليدوي رفضاً قاطعاً!"`). The protocol exists so the project proves an engine, not a puppeteer. |
 | **PR-20.6: the bot restores its own funds** | ✅ Accepted — and it turned out not to need a shop at all |
 
-### 21.3 The account was never broke
+### 21.3 The account "was never broke" — RETRACTED by field evidence
 
-`Stage 2 Stronghold` banked **10,000 GP** on this very account (`LIVE_WIRE_VERIFIED`). The 55 GP was
-pocket money. So the correct behaviour was always available: **walk to a bank and withdraw the
-shortfall from the bot's own earnings.** Two bugs prevented it:
+> ⚠️ **`RETRACTED` (field incident #12).** This section originally asserted that `acc_02` still held
+> the **10,000 GP** banked by `PR-17.5`'s Stronghold run. The operator's live probe destroyed that
+> assumption outright:
+>
+> ```
+> GET /bank -> {"open": true, "count": 6, "items": [Shortbow(841), Wooden shield(1171),
+>              Bronze axe(1351), Small fishing net(303), Raw shrimps(317), Fancy boots(9005)]}
+> ```
+>
+> **Zero coins.** `Fancy boots (9005)` proves the Stronghold deposit *happened*; the coins are gone
+> (spent or lost afterwards — the record cannot say which). The engine's response was correct and
+> immediate: `[tick=0002] dir=ESCALATE_HUMAN | SUPPLY_UNSOURCED:Coins`, with **no** phantom 200-tile
+> trek. Only the documentation was wrong, and this is the same rule that demoted every wiki tile:
+> **field ground truth outranks our own documents.**
+>
+> Lesson recorded: never state bank contents without a fresh `GET /bank` in the same breath.
+
+Two bugs in the *funding* path were real regardless, and were fixed:
 
 1. **`_coin_float_resolved` was a one-way latch.** Once the bot had been funded, it could never be
    funded *again*. After the death it kept asking Aggie for a dye it could not pay for, forever.
@@ -1044,6 +1059,80 @@ for this account and keeps the invariant intact.
 | `T143` | funding routes to the nearest bank (Draynor from Draynor, Falador West from the north-west) |
 | `T144` | the withdrawal is exactly the missing amount (34 of a 35 GP budget) from the bot's own bank |
 | `T145` | a funded bot that dies asks the bank again (the latch is gone) and settles once topped up |
-| `T146` | an account with no coins anywhere stops asking and escalates `SUPPLY_UNSOURCED:Coins` |
+| `T146` | an account with no coins anywhere never ping-pongs between banks (revised by `PR-20.7`: it earns) |
 
 Full suite: **`154 passed`** (`T01..T146`), `0 failed`.
+
+---
+
+## 22. `PR-20.7` — Zero-Touch coin EARNING (field incident #12)
+
+### 22.1 The constraint that decided everything
+
+After the bank came back empty, two field proposals were on the table:
+
+| proposal | verdict |
+|---|---|
+| **Operator drops 50 GP into the account, or sells the banked bow + axe at the general store by hand** | ❌ **REFUSED.** A hand-out *and* a manual click — the two things the ratified `Zero-Touch Invariant` exists to forbid (`"⛔ نرفض الخيار (ب) والتدخل اليدوي رفضاً قاطعاً!"`). Accepting it would prove a puppet-master, not an engine. |
+| **The engine earns the 30 GP itself** | ✅ Implemented here |
+
+### 22.2 Why pickpocketing, and not the shop
+
+Every other income path needs an interface we have never seen live:
+
+| path | blocker |
+|---|---|
+| sell banked gear at a general store | the sale is a **shop-interface widget click**; the shop's `groupId`/`childId` and the shopkeeper's dialogue text are unobserved. `WIDGET_CLICK` is proven for Make-X `270:15` only. Guessing widget ids is forbidden. |
+| Grand Exchange | no `/grand-exchange` endpoint exists in the AgentServer at all |
+| `Doric's Quest` (180 GP reward) | needs `Mining 15` for the iron ore |
+| Stronghold chests | one-time rewards, already collected (`Fancy boots` is the proof) |
+| **pickpocket a citizen** | **nothing new**: `Pickpocket` is a name-based `action` on `/npcs/interact` — the exact call shape already `LIVE_WIRE_VERIFIED` for `Talk-to` (Aggie/Wyson/Fred) **and** `Shear` (Sheep, 20 wool). |
+
+`Shear` is the decisive precedent: a non-dialogue action verb, name-resolved, already proven on the
+live wire. `Pickpocket` rides the same rail. A citizen yields **3 GP**, and there is no downside risk
+for a level-3 account: a failed pickpocket only stuns.
+
+### 22.3 The engine rule
+
+```
+bank has the coins  -> withdraw (PR-20.6, nearest bank)
+bank is empty       -> EARN: pickpocket citizens at the Draynor village centre
+nothing reachable   -> SUPPLY_UNSOURCED:Coins:pickpocket_exhausted(<n>)
+```
+
+Details that matter:
+
+* **Demand-driven, three levels deep.** Coins are only pursued while an outstanding goblin mail still
+  needs a dye that is neither in the bag nor in the known bank (`_coins_still_needed`). A bot whose
+  `Orange dye` + `Blue dye` are already banked never pickpockets at all (`T151`).
+* **Bounded.** `COIN_EARN_ATTEMPT_CAP = 80`; on exhaustion it disarms (`_coin_float_unavailable`) and
+  the dye step reports the precise blocker. No infinite loop (`T149`).
+* **Where it stands.** `COIN_EARN_NODE = DRAYNOR_BANK`, `COIN_EARN_RADIUS = 14`: the village centre the
+  bot is already in, with the dark wizards outside the radius. Earning never walks into the corridor
+  that killed the account.
+* **Stateless purse.** The earning target is re-derived from the live inventory every tick; three
+  pickpockets pay for the yellow dye alone, twelve pay the whole budget.
+
+### 22.4 Fakes were made faithful, not weakened
+
+The first run of the new rule broke four older tests. Every one of them was a **fake limitation**,
+never an engine regression:
+
+* `tests/test_pr18_...goblin_dye_crafting.py` (`T68`) — the hand-written wire stub only answered
+  `/npcs/interact` for `General Bentnoze`. It now models `Pickpocket -> +3 GP`, exactly as the real
+  mechanic does, and its Bentnoze assertion excludes leftover coins (the bot keeps its change — the
+  same relaxation `T69` already carries).
+* `osrs_ee/runtime/fake_adapter.py` — `INTERACT_NPC` now models `Pickpocket -> 3 GP`, deterministically
+  (a fake proves the chain, never the dice).
+
+### 22.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T147` | the live regression: an empty bank makes the bot EARN instead of escalating at tick 2 |
+| `T148` | proven-shape `Pickpocket`, target alternation, and an immediate stop at the 35 GP budget |
+| `T149` | bounded failure: `SUPPLY_UNSOURCED:Coins:pickpocket_exhausted(80)`, then disarmed |
+| `T150` | the whole 0 GP → funded run, tick by tick: 12 successful pickpockets, nothing withdrawn |
+| `T151` | anti-false-positive: dyes already banked ⇒ zero pickpockets |
+
+Full suite: **`159 passed`** (`T01..T151`), `0 failed`.

@@ -108,6 +108,9 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         # anchor bank. The operator never supplies GP — this is the bot's own Stage-2 income.
         self._coin_float_resolved = False
         self._coin_float_unavailable = False
+        # `PR-20.7`: in-world coin EARNING (pickpocketing) once every bank is proven empty.
+        self._coin_earning = False
+        self._coin_earn_attempts = 0
         # Baseline QP captured on the first tick: the QP latch must fire on *progress made by this
         # run*, never on QP the account already carried from earlier stages.
         self._baseline_quest_points: int | None = None
@@ -298,19 +301,81 @@ class TradeUnlockQuestsTaskModule(TaskModule):
         held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
         if held >= self.COIN_FLOAT_GP:
             self._coin_float_resolved = True
+            # `PR-20.7`: the earned purse is spent on the dyes, so the earning counter only resets
+            # once the float is whole again — never mid-chain.
+            self._coin_earn_attempts = 0
+            self._coin_earning = False
             return None
         self._coin_float_resolved = False
+        if self._coin_earning:
+            return self._earn_coins(ctx)
         # Only top up what is actually missing (a bot that already earned Fred's 60 GP needs nothing).
         directive = self._procure(ctx, COINS_ID, self.COIN_FLOAT_GP - held, "Coins")
         if directive is None:
             self._coin_float_resolved = True
             return None
         if directive.directive_type == DirectiveType.ESCALATE_HUMAN:
-            # No coins anywhere in the bot's own economy: stop asking the bank every tick and let the
-            # exact `SUPPLY_UNSOURCED:Coins` escalate at the dye step that actually needs them.
-            self._coin_float_unavailable = True
-            return None
+            # `PR-20.7` FIELD TRUTH: the bank is genuinely empty (live `GET /bank` on `acc_02`:
+            # 6 items, ZERO coins — the documented 10,000 GP of `PR-17.5` is not there). The old
+            # behaviour — give up and let the dye step escalate — left an entirely able account
+            # blocked for want of 30 GP. The bot now EARNS the money the way a player would.
+            self._coin_earning = True
+            return self._earn_coins(ctx)
         return directive
+
+    # ------------------------------------------------------------------
+    # `PR-20.7` Zero-Touch coin EARNING (no operator GP, no shop, no guessing)
+    # ------------------------------------------------------------------
+    # `Pickpocket` goes through the SAME `/npcs/interact` shape already LIVE proven twice over:
+    # `Talk-to` (Aggie / Wyson / Fred) and `Shear` (Sheep, 20 wool). A name-based action on a proven
+    # endpoint — not a widget guess, not a shop interface.
+    COIN_EARN_ATTEMPT_CAP = 80
+    PICKPOCKET_TARGETS: tuple[str, ...] = ("Man", "Woman")
+    # The bot funds itself where it already IS: the Draynor village centre is field-verified
+    # (`DRAYNOR_BANK 3092,3245`) and full of citizens, while the dark wizards sit south of the wall
+    # outside this radius — so earning never walks into the corridor that killed the account.
+    COIN_EARN_NODE = "DRAYNOR_BANK"
+    COIN_EARN_RADIUS = 14
+
+    def _earn_coins(self, ctx: TickContext) -> TaskDirective | None:
+        """Earn the missing dye budget in-world (`PR-20.7`), one pickpocket tick at a time."""
+        held = _inv_count(ctx.inventory_items, item_id=COINS_ID, noted=False)
+        if held >= self.COIN_FLOAT_GP:
+            self._coin_earning = False
+            self._coin_float_resolved = True
+            self._coin_earn_attempts = 0
+            return None
+        if self._coin_earn_attempts >= self.COIN_EARN_ATTEMPT_CAP:
+            self._coin_float_unavailable = True
+            self._coin_earning = False
+            return TaskDirective(
+                directive_type=DirectiveType.ESCALATE_HUMAN,
+                reason=f"SUPPLY_UNSOURCED:Coins:pickpocket_exhausted({self._coin_earn_attempts})",
+            )
+        node = DEFAULT_WORLD_NODES.get(self.COIN_EARN_NODE)
+        if (
+            node is not None
+            and ctx.position.plane == 0
+            and ctx.position.chebyshev_distance(node) > self.COIN_EARN_RADIUS
+        ):
+            return TaskDirective(
+                directive_type=DirectiveType.NAVIGATE_TO,
+                destination=self.COIN_EARN_NODE,
+                reason=(
+                    f"Zero-Touch earnings: walking to {self.COIN_EARN_NODE} to earn "
+                    f"{self.COIN_FLOAT_GP - held} GP more"
+                ),
+            )
+        target = self.PICKPOCKET_TARGETS[self._coin_earn_attempts % len(self.PICKPOCKET_TARGETS)]
+        self._coin_earn_attempts += 1
+        return TaskDirective(
+            directive_type=DirectiveType.INTERACT_NPC,
+            payload={"name": target, "action": "Pickpocket"},
+            reason=(
+                f"Zero-Touch earnings: pickpocketing {target} "
+                f"({held}/{self.COIN_FLOAT_GP} GP, attempt {self._coin_earn_attempts})"
+            ),
+        )
 
     def _procure(self, ctx: TickContext, item_id: int, quantity: int, label: str) -> TaskDirective | None:
         """Zero-Touch cascade: inventory -> bank (once) -> in-world gathering/crafting -> escalate."""
@@ -381,19 +446,50 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                 return directive
         return None
 
+    def _owns_or_banked(self, ctx: TickContext, item_id: int) -> bool:
+        """Is `item_id` already in the bag, or known to be in the bank? (`PR-20.7`)
+
+        Conservative while the bank is unaudited (`_bank_stock` empty): an unknown vault must not be
+        assumed to hold the dyes, so the coin budget stays demanded until the audit says otherwise.
+        """
+        if _inv_count(ctx.inventory_items, item_id=item_id, noted=False) > 0:
+            return True
+        return int(self._bank_stock.get(item_id, 0)) > 0
+
+    def _coins_still_needed(self, ctx: TickContext, outstanding: list[tuple[int, str]]) -> bool:
+        """Do the OUTSTANDING goblin mails still need a dye that costs money? (`PR-20.7`)
+
+        Coins are only ever spent on dyes: Wyson's 20 GP for woad leaves and Aggie's 5 GP per dye.
+        The plain brown mail is free from a crate. A finished dye already in the bag or the bank makes
+        the whole coin budget moot — the live order-agnostic case, where the dyes survive a death while
+        the cash does not (OSRS keeps only the three most valuable items).
+        """
+        outstanding_ids = {item_id for item_id, _ in outstanding}
+        if ORANGE_GOBLIN_MAIL_ID in outstanding_ids and not self._owns_or_banked(ctx, ORANGE_DYE_ID):
+            return True
+        if BLUE_GOBLIN_MAIL_ID in outstanding_ids and not self._owns_or_banked(ctx, BLUE_DYE_ID):
+            return True
+        return False
+
     def _prepare_goblin_diplomacy_supplies(self, ctx: TickContext) -> TaskDirective | None:
         """Zero-Touch Goblin Diplomacy staging: 1 blue mail + 1 orange mail + 1 plain brown mail."""
-        # `PR-20.4`: the coin float belongs HERE — the only stage that spends money. Doing it at the
-        # top of the bundle sent the bot on a bank trek before it had done any quest work.
-        coin_float = self._ensure_coin_float(ctx)
-        if coin_float is not None:
-            return coin_float
         # Verified wire order (T68): Orange dye on Goblin mail FIRST, then Blue dye -> [1769, 288, 1767, 288].
-        for item_id, label in (
+        wanted = (
             (ORANGE_GOBLIN_MAIL_ID, "Orange goblin mail"),
             (BLUE_GOBLIN_MAIL_ID, "Blue goblin mail"),
             (GOBLIN_MAIL_ID, "Goblin mail"),
-        ):
+        )
+        outstanding = [(i, l) for i, l in wanted if _inv_count(ctx.inventory_items, item_id=i, noted=False) < 1]
+        # `PR-20.4`/`PR-20.7`: the coin float belongs HERE — the only stage that spends money — and
+        # it is strictly DEMAND-DRIVEN. Only the two DYE mails cost coins (Wyson 20 GP, Aggie 5 GP per
+        # dye); the plain brown mail is free from a crate. Seeking GP while those two are already made
+        # (or while only the free mail is missing) burned a bank trek in `PR-20.4` and would now burn
+        # 80 pickpocket attempts — so the demand gate covers earning too.
+        if self._coins_still_needed(ctx, outstanding):
+            coin_float = self._ensure_coin_float(ctx)
+            if coin_float is not None:
+                return coin_float
+        for item_id, label in outstanding:
             directive = self._procure(ctx, item_id, 1, label)
             if directive is not None:
                 return directive
