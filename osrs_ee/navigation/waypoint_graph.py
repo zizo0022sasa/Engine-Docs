@@ -143,7 +143,13 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "DRAYNOR_AGGIE": WorldPoint(3087, 3232, 0, "DRAYNOR_AGGIE"),
     "FALADOR_PARK": WorldPoint(3000, 3375, 0, "FALADOR_PARK"),
     "VARROCK_CADAVA_BUSHES": WorldPoint(3268, 3368, 0, "VARROCK_CADAVA_BUSHES"),  # pins 3264..3277
-    "VARROCK_REDBERRY_BUSHES": WorldPoint(3240, 3358, 0, "VARROCK_REDBERRY_BUSHES"),
+    # `PR-20.3` FIELD-PROVEN (live probe `GET /objects?name=Redberry bush` on 8081):
+    #   Redberry bush id 23628 at (3272, 3375)  and  id 23628 at (3277, 3371)
+    # The old tile (3240, 3358) sat ~35 tiles south-west, right next to the Dark Wizard circle, and
+    # made the engine walk the bot AWAY from the two real bushes -> `Pick` -> client walks east ->
+    # outside the work site -> dragged back -> tether ping-pong (same class as incident #5/#7).
+    # The node is now the geometric midpoint of the two live bushes (chebyshev <= 2 to each).
+    "VARROCK_REDBERRY_BUSHES": WorldPoint(3274, 3373, 0, "VARROCK_REDBERRY_BUSHES"),
 }
 
 
@@ -443,7 +449,9 @@ def _build_default_edges() -> tuple[GraphEdge, ...]:
             "edge_id": "supply_cadava_to_redberry_bushes",
             "src": "VARROCK_CADAVA_BUSHES",
             "dst": "VARROCK_REDBERRY_BUSHES",
-            "cost_tiles": 30.0,
+            # `PR-20.3`: (3268,3368) -> (3274,3373) is chebyshev 6, not 30 (the old cost was derived
+            # from the WRONG tile).
+            "cost_tiles": 8.0,
         },
     ]
 

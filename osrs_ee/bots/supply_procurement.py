@@ -63,6 +63,7 @@ DAIRY_COW_OBJECT_ID = 8689
 WHEAT_OBJECT_ID = 15506        # live: `Wheat` action "Pick" at (3162,3296)
 MILL_DOOR_OBJECT_ID = 1521     # live: `Large door` (1521 / 1524) at (3166,3302)
 FLOUR_BIN_OBJECT_ID = 1781     # live: `Flour bin` at (3166,3306)
+REDBERRY_BUSH_OBJECT_ID = 23628  # live: 2x `Redberry bush` at (3272,3375) & (3277,3371)  # PR-20.3
 SPINNING_WHEEL_OBJECT_ID = 14889  # live: `Spinning wheel` at (3209,3212) plane 1  # PR-20.2
 MILL_LADDER_OBJECT_ID = 12964  # live: `Ladder` at (3164,3307)  # live `GET /objects?name=Dairy cow` -> id 8689 (Milk option)
 POT_ID = 1931
@@ -501,11 +502,13 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("VARROCK_REDBERRY_BUSHES"),
                 targets=("Redberry bush",),
                 action="Pick from",
+                # `PR-20.3` LIVE: both bushes are object `23628`; name-matching alone is a coin flip.
+                object_id=REDBERRY_BUSH_OBJECT_ID,
                 produces=((REDBERRY_ID, 3),),
-                # `PR-20.2` PRE-EMPTIVE: two separate wild bushes (not one) — the bot must be able to
-                # walk between them without being dragged back to a single anchor tile.
-                area_radius=8,
-                note="two wild redberry bushes south-east of Varrock, EAST of the dark wizard circle",
+                # `PR-20.2`/`PR-20.3`: two separate wild bushes ~6 tiles apart. With the anchor now at
+                # their midpoint, radius 6 covers both and their immediate surroundings.
+                area_radius=6,
+                note="two wild redberry bushes 23628 at (3272,3375) and (3277,3371)",
             ),
         ),
     ),

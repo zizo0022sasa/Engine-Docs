@@ -745,3 +745,64 @@ Full suite: **`141 passed`** (`T01..T133`), `0 failed`.
    will run rather than fight.
 3. **Apothecary dialogue**: the potion requires the berries to still be held; `T113` re-acquires them,
    the live text still needs confirming.
+
+---
+
+## 18. `PR-20.3` — Redberry bushes: the coordinate the world actually has (field incident #8)
+
+### 18.1 The live probe
+
+`GET /objects?name=Redberry bush` on `8081`:
+
+```json
+{ "id": 23628, "name": "Redberry bush", "position": { "x": 3272, "y": 3375, "plane": 0 } }
+{ "id": 23628, "name": "Redberry bush", "position": { "x": 3277, "y": 3371, "plane": 0 } }
+```
+
+The graph node said `VARROCK_REDBERRY_BUSHES = (3240, 3358)` — **~35 tiles south-west, next to the
+level-20 Dark Wizard circle**. The live loop (ticks 35..70) was the familiar one:
+
+```text
+INTERACT_OBJECT  Pick from Redberries    -> the client starts walking east to the real bush
+NAVIGATE_TO      walking to VARROCK_REDBERRY_BUSHES   -> outside the work site, dragged back
+INTERACT_OBJECT  Pick from Redberries    -> ...
+```
+
+Third member of the same family: incident #5 (throne room), #7 (sheep pen), #8 (redberries). The
+common root is always the same — **a coordinate that is not the world's**, harvested from the wiki.
+
+### 18.2 The fix
+
+| item | before | after |
+|---|---|---|
+| `VARROCK_REDBERRY_BUSHES` | `(3240, 3358)` | **`(3274, 3373)`** — the midpoint of the two live bushes |
+| `supply_cadava_to_redberry_bushes` | `30.0` | **`8.0`** (chebyshev is 6; 30 came from the wrong tile) |
+| bush identity | name match only | **`REDBERRY_BUSH_OBJECT_ID = 23628`** pinned |
+| work site | `area_radius=8` around the wrong tile | **`area_radius=6`** around the midpoint (both bushes ≤ 3 tiles) |
+| `T101` regional rectangle | `(3230..3255, 3345..3370)` | `(3260..3290, 3360..3385)` — the old box described the wrong place, so it *accepted* the bug |
+
+Safety side-effect worth stating: the work site moved from **14 tiles** away from the Dark Wizard
+circle to **48**. A combat-3 account was being parked inside a level-20 aggressor's neighbourhood.
+
+### 18.3 Verification
+
+| test | guarantee |
+|---|---|
+| `T134` | both probed bush tiles are inside `area_radius`, the node IS their midpoint, and standing on either bush yields `Pick from` (never a walk) |
+| `T135` | live id `23628` pinned, `Pick from` preserved, cadava→redberry edge honest, the node stays routable from the anchor bank |
+| `T136` | the work site is ≥ 40 tiles from the Dark Wizards, and the hazard edge is still combat-gated |
+
+Full suite: **`144 passed`** (`T01..T136`), `0 failed`.
+
+### 18.4 The pattern, stated once, for the rest of Stage 1A
+
+Every remaining unknown in `Goblin Diplomacy` is the same shape: **a name-matched object or a
+wiki-derived tile**. Before the next field run, these are the suspects, in order of risk:
+
+1. **Goblin crates** — three steps, all `{"name": "Crate"}` at the single node `GOBLIN_VILLAGE
+   (2958,3512)`. The client picks the *nearest* crate, which may be the one already looted; and the
+   village huts are far wider than the 3-tile tolerance. **Highest risk of incident #9.**
+2. **Aggie** `(3087,3232)` — wiki-derived, never probed.
+3. **Wyson the gardener** — wanders Falador Park; the node `(3000,3375)` is a single tile in a large
+   park (pen geometry again).
+4. **General Bentnoze / Wartface** — dialogue options are wiki transcripts, not live text.

@@ -169,7 +169,9 @@ def test_t101_every_supply_node_sits_inside_its_documented_region() -> None:
         ("DRAYNOR_AGGIE", 3075, 3100, 3220, 3245),
         ("FALADOR_PARK", 2985, 3015, 3360, 3390),
         ("VARROCK_CADAVA_BUSHES", 3255, 3285, 3355, 3385),
-        ("VARROCK_REDBERRY_BUSHES", 3230, 3255, 3345, 3370),
+        # `PR-20.3`: live probe puts the two bushes at (3272,3375) & (3277,3371); the old rectangle
+        # described the WRONG (dark-wizard-adjacent) area and happily accepted the bug.
+        ("VARROCK_REDBERRY_BUSHES", 3260, 3290, 3360, 3385),
         ("GOBLIN_VILLAGE", 2945, 2975, 3495, 3525),
     )
     for node_id, x_min, x_max, y_min, y_max in regions:
