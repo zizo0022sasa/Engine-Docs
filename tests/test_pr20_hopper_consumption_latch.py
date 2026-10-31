@@ -83,7 +83,8 @@ def _walk_mill(
         action = str(directive.payload.get("action"))
         seen.append((tick, name, action))
         if name in ("Ladder", "Staircase", "Stairs"):
-            plane = 2 if action == "Climb-up" else 0
+            # `PR-21.6`: one plane per rung — the mill has two ladders up and two down.
+            plane = min(2, plane + 1) if action == "Climb-up" else max(0, plane - 1)
         elif name == "Hopper" and consume_grain:
             inventory = [it for it in inventory if int(it["item_id"]) != GRAIN_ID]
         elif name == "Flour bin":
@@ -106,7 +107,7 @@ def test_t103_hopper_fill_is_not_done_until_the_grain_leaves_the_inventory() -> 
     plane = 0
     filler_hits = 0
     reached_hopper = False
-    for tick in range(1, 22):
+    for tick in range(1, 45):
         pos = WorldPoint(TOP.x, TOP.y, plane) if plane == 2 else WorldPoint(MILL.x, MILL.y, plane)
         directive = engine.ensure(_ctx(pos, inventory, tick), POT_OF_FLOUR_ID, 1)
         assert directive is not None
@@ -114,7 +115,8 @@ def test_t103_hopper_fill_is_not_done_until_the_grain_leaves_the_inventory() -> 
             continue
         name = str(directive.payload.get("name"))
         if name in ("Ladder", "Staircase", "Stairs"):
-            plane = 2 if directive.payload.get("action") == "Climb-up" else 0
+            plane = (min(2, plane + 1) if directive.payload.get("action") == "Climb-up"
+                     else max(0, plane - 1))
             continue
         if name == "Large door":
             assert not reached_hopper
@@ -127,9 +129,13 @@ def test_t103_hopper_fill_is_not_done_until_the_grain_leaves_the_inventory() -> 
         reached_hopper = True
 
     assert filler_hits > 1, "the hopper must be re-clicked while the grain has not been consumed"
-    # The latch state is observable and never claims completion.
-    assert (POT_OF_FLOUR_ID, 2) in engine._pending_consumption
-    assert (POT_OF_FLOUR_ID, 2) not in engine._done
+    # The latch state is observable and never claims completion. `PR-21.6`: derive the index — the mill
+    # now has two ladder steps, and a hardcoded `2` silently pointed at the second ladder.
+    hop_idx = next(
+        i for i, st in enumerate(SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps) if "Hopper" in st.targets
+    )
+    assert (POT_OF_FLOUR_ID, hop_idx) in engine._pending_consumption
+    assert (POT_OF_FLOUR_ID, hop_idx) not in engine._done
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +193,7 @@ def test_t106_a_step_that_only_requires_items_is_not_consumption_latched() -> No
     assert door.consumes == ((GRAIN_ID, 1), (POT_ID, 1))
     assert door.uses_up == (), "the door must not declare uses_up — it does not destroy its inputs"
     # ...and the hopper DOES declare it, which is the whole point of the latch.
-    hopper = SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps[2]
+    hop_idx = next(i for i, st in enumerate(SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps) if "Hopper" in st.targets)
+    hopper = SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps[hop_idx]
     assert hopper.targets == ("Hopper",)
     assert hopper.uses_up == ((GRAIN_ID, 1),)

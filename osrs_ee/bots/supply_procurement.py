@@ -53,7 +53,7 @@ from enum import StrEnum
 from typing import Any, Callable, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TickContext
-from osrs_ee.navigation.underground import classify_underground, exit_for
+from osrs_ee.navigation.underground import classify_underground, exit_for, required_climb_attempts
 from osrs_ee.navigation.waypoint_graph import DEFAULT_WORLD_NODES, WorldPoint
 
 # ---------------------------------------------------------------------------
@@ -304,14 +304,28 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 settle_ticks=0,
                 note="mill entrance door 1521 at (3166,3302)",
             ),
+            # `PR-21.6` FIELD FIX (incident #12, `SUPPLY_CLIMB_FAILED:MILL_LANE_MILL`): the mill is
+            # THREE planes and each ladder exists on ONE of them. A single step jumping 0 -> 2 kept
+            # re-issuing `Climb-up` on object `12964` from plane 1, where that ladder does not exist, until
+            # the attempt budget ran out. One step per plane, and only the ground-floor ladder carries a
+            # pinned id (it is the one live-proven at `(3164,3307)`); the upper rungs are NAME-resolved,
+            # because a wrong id is a hard failure while a name lets the client find the ladder it has.
             SupplyStep(
                 kind=SupplyStepKind.CLIMB,
                 area=_at("MILL_LANE_MILL"),
-                targets=("Ladder", "Staircase", "Stairs"),
+                targets=("Ladder",),
+                action="Climb-up",
+                target_plane=1,
+                object_id=MILL_LADDER_OBJECT_ID,
+                note="ladder 12964: ground floor -> first floor",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.CLIMB,
+                area=_at("MILL_LANE_MILL"),
+                targets=("Ladder",),
                 action="Climb-up",
                 target_plane=2,
-                object_id=MILL_LADDER_OBJECT_ID,
-                note="ladder 12964 up to the hopper floor (plane 2)",
+                note="first floor -> hopper floor (name-resolved; 12965 is field-reported, unprobed)",
             ),
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
@@ -334,11 +348,18 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
             SupplyStep(
                 kind=SupplyStepKind.CLIMB,
                 area=_at("LUMBRIDGE_WINDMILL_TOP", plane=2),
-                targets=("Ladder", "Staircase", "Stairs"),
+                targets=("Ladder",),
+                action="Climb-down",
+                target_plane=1,
+                note="hopper floor -> first floor",
+            ),
+            SupplyStep(
+                kind=SupplyStepKind.CLIMB,
+                area=_at("LUMBRIDGE_WINDMILL_TOP", plane=2),
+                targets=("Ladder",),
                 action="Climb-down",
                 target_plane=0,
-                object_id=MILL_LADDER_OBJECT_ID,
-                note="back down to the ground floor",
+                note="first floor -> ground floor (the flour bin lives here)",
             ),
             SupplyStep(
                 kind=SupplyStepKind.OBJECT,
@@ -472,6 +493,11 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 area=_at("FALADOR_PARK"),
                 targets=("Wyson the gardener", "Wyson"),
                 action="Talk-to",
+                # `PR-21.6` FIELD FIX (incident #16, `SUPPLY_STEP_STALLED:Woad leaves:NPC:Wyson`):
+                # the anchor is the park waypoint, but Wyson patrols by his hut at the EAST end. With the
+                # 3-tile default the bot never got near enough to resolve him. Same remedy as the sheep
+                # pen (`PR-20.1`): widen the WORK SITE, never the global `walk_tolerance`.
+                area_radius=32,
                 # `PR-20`: 2 woad leaves are NOT free — Wyson asks for 20 GP. The coins are withdrawn
                 # from the bot's OWN banked earnings (never handed over by the operator).
                 consumes=((COINS_ID, 20),),
@@ -1190,7 +1216,12 @@ class ZeroTouchSupplyEngine:
         area_label = area_label or "underground"
         exits = self._walk_attempts.get(key, 0) + 1
         self._walk_attempts[key] = exits
-        if exits > self.max_climb_attempts:
+        # `PR-21.6`: the budget must COVER the list, never truncate it. With 3 names and 12 attempts the
+        # last name was first tried on attempt 13 — i.e. never — while two names that do not exist in the
+        # room soaked up the entire budget. `required_climb_attempts` is the arithmetic form of "you may
+        # not disable the exit you are looking for".
+        budget = max(int(self.max_climb_attempts), required_climb_attempts(targets))
+        if exits > budget:
             return self._escalate(f"SUPPLY_EXIT_BLOCKED:{area_label}")
         name = targets[min(len(targets) - 1, (exits - 1) // 6)] if targets else "Staircase"
         return TaskDirective(

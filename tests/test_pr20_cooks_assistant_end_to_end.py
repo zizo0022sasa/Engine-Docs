@@ -54,7 +54,9 @@ def _cook_world(command_type: str, payload: dict[str, Any], adapter: FakeGameAda
             adapter._add_to_inventory({"item_id": GRAIN_ID, "name": "Grain", "quantity": 1, "noted": False})
         elif name in ("Ladder", "Staircase", "Stairs"):
             cur = dict(adapter.position)
-            cur["plane"] = 2 if action == "Climb-up" else 0
+            # `PR-21.6`: one plane per rung — the mill needs two climbs each way.
+            cur["plane"] = (min(2, int(cur["plane"]) + 1) if action == "Climb-up"
+                            else max(0, int(cur["plane"]) - 1))
             adapter.position = cur
         elif name == "Hopper":
             # `PR-20`: the hopper EATS the grain — this is the field-incident postcondition.
@@ -223,7 +225,7 @@ def test_t108_cook_dialogue_is_selected_by_verbatim_text_and_never_by_index() ->
     )
     directive = bot.evaluate_tick(ctx)
     assert directive.directive_type == DirectiveType.ESCALATE_HUMAN
-    assert directive.reason == "UNRECOGNIZED_QUEST_DIALOGUE_OPTION"
+    assert directive.reason.startswith("UNRECOGNIZED_QUEST_DIALOGUE_OPTION")
 
     # A plain "continue" (no options on screen) advances the dialogue instead of stalling.
     ctx = _fetch_ctx(WorldPoint(3206, 3214, 0), varps=varps)

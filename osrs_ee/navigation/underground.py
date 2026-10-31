@@ -64,17 +64,40 @@ UNDERGROUND_REGIONS: tuple[UndergroundRegion, ...] = (
 )
 
 UNDERGROUND_EXITS: dict[str, UndergroundExit] = {
+    # `PR-21.6` FIELD FIX (incident #12, `SUPPLY_EXIT_BLOCKED:LUMBRIDGE_CASTLE_BASEMENT`):
+    # the cellar has exactly ONE way out — the `Ladder` (`17385`) at `(3209,9616)`. It had no staircase
+    # and no stairs, yet the target list named `Staircase` and `Stairs` FIRST; the attempts budget is
+    # spent in blocks of 6 per name, so 12 attempts exhausted on two names that do not exist and
+    # `Ladder` was never even tried. Order is now existence-first, and the budget scales with the list
+    # (`required_climb_attempts`) so a longer list can never starve its own last entry again.
+    # `at_x/at_y` point at the ladder tile — an object tile is not a destination (see `PR-21.5`).
     "LUMBRIDGE_CASTLE_BASEMENT": UndergroundExit(
         region="LUMBRIDGE_CASTLE_BASEMENT",
-        at_x=3216,
-        at_y=9625,
+        at_x=3210,
+        at_y=9616,
         plane=0,
-        targets=("Staircase", "Stairs", "Ladder"),
+        targets=("Ladder", "Trapdoor", "Staircase"),
         action="Climb-up",
     ),
     # The Stronghold exit is driven by `StrongholdTaskModule` (Bone chain `23732`), not by the supply
     # engine, so no generic exit is registered here.
 }
+
+
+CLIMB_ATTEMPTS_PER_NAME = 6
+
+
+def required_climb_attempts(targets: tuple[str, ...]) -> int:
+    """Attempts needed to actually TRY the last name in a target list (`PR-21.6`).
+
+    The exit loop walks `targets[(exits - 1) // 6]`, so the `n`-th name is first tried on attempt
+    `6 * n + 1`. A budget smaller than that silently disables every name at the end of the list — which
+    is exactly how the cellar's only exit (`Ladder`) became unreachable behind two names that do not
+    exist in the room.
+    """
+    if not targets:
+        return CLIMB_ATTEMPTS_PER_NAME
+    return CLIMB_ATTEMPTS_PER_NAME * (len(targets) - 1) + 1
 
 
 def classify_underground(x: int, y: int) -> UndergroundRegion | None:

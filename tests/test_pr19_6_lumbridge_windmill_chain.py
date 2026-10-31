@@ -106,21 +106,34 @@ def test_t99_mill_chain_runs_in_order_once_per_step_without_stair_ping_pong() ->
         name, action = str(d.payload.get("name")), str(d.payload.get("action"))
         sequence.append((name, action))
         if name in ("Ladder", "Staircase", "Stairs"):
-            plane = 2 if action == "Climb-up" else 0
+            # `PR-21.6`: a ladder moves ONE plane. The old fake teleported 0 <-> 2, which is what
+            # let a single-step 0->2 climb look correct in a hermetic test while freezing live.
+            plane = min(2, plane + 1) if action == "Climb-up" else max(0, plane - 1)
         if name == "Hopper":
             # `PR-20`: the real hopper DESTROYS the grain. The engine may only advance to `Operate`
             # once it has observed that destruction on a later tick.
             inventory = [it for it in inventory if int(it["item_id"]) != GRAIN_ID]
-        if len(sequence) >= 7:
+        if len(sequence) >= 9:  # `PR-21.6`: two ladders up, two down
             break
 
+    # `PR-21.6`: the mill is THREE planes. A ladder moves one floor, so the honest sequence is
+    # TWO climbs up (0->1->2) and TWO down (2->1->0) around the hopper work — never one 0<->2 jump,
+    # which is the shape that froze live (`SUPPLY_CLIMB_FAILED:MILL_LANE_MILL`).
     assert sequence[0] == ("Large door", "Open")
     assert sequence[1] == ("Ladder", "Climb-up")
-    assert sequence[2] == ("Hopper", "Fill")
-    assert sequence[3] == ("Hopper controls", "Operate")
-    assert sequence[4] == ("Ladder", "Climb-down")
-    assert sequence[5][0] == "Flour bin"
-    assert sum(1 for n, a in sequence if n == "Ladder" and a == "Climb-up") == 1, sequence
+    assert sequence[2] == ("Ladder", "Climb-up")
+    assert sequence[3] == ("Hopper", "Fill")
+    assert sequence[4] == ("Hopper controls", "Operate")
+    assert sequence[5] == ("Ladder", "Climb-down")
+    assert sequence[6] == ("Ladder", "Climb-down")
+    assert sequence[7][0] == "Flour bin"
+    assert sum(1 for n, a in sequence if n == "Ladder" and a == "Climb-up") == 2, sequence
+    assert sum(1 for n, a in sequence if n == "Ladder" and a == "Climb-down") == 2, sequence
+
+    # Every climb moves exactly ONE plane — the invariant that keeps the client's ladders resolvable.
+    climbs = [st for st in SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps if st.kind.name == "CLIMB"]
+    for prev, cur in zip(climbs, climbs[1:]):
+        assert abs(int(cur.target_plane) - int(prev.target_plane)) == 1, (prev.note, cur.note)
 
     # Verified object ids travel with the payload.
     assert SUPPLY_RECIPES[POT_OF_FLOUR_ID].steps[0].object_id == MILL_DOOR_OBJECT_ID == 1521
@@ -169,7 +182,9 @@ def test_t101_every_supply_node_sits_inside_its_documented_region() -> None:
         # `PR-20.4`: the live house is at (3086,3258); the old box (y<=3245) described the fishing
         # pier and therefore ACCEPTED a node 26 tiles away from Aggie.
         ("DRAYNOR_AGGIE", 3070, 3105, 3245, 3275),
-        ("FALADOR_PARK", 2985, 3015, 3360, 3390),
+        # `PR-21.6`: the park anchor moved east to Wyson's hut approach (3028,3379); the old box
+        # (x<=3015) described the west end where `Sir Tiffy Cashien` stands, 31 tiles from the NPC.
+        ("FALADOR_PARK", 2985, 3040, 3360, 3395),
         ("VARROCK_CADAVA_BUSHES", 3255, 3285, 3355, 3385),
         # `PR-20.3`: live probe puts the two bushes at (3272,3375) & (3277,3371); the old rectangle
         # described the WRONG (dark-wizard-adjacent) area and happily accepted the bug.
@@ -228,7 +243,8 @@ def test_t102_kernel_run_produces_pot_of_flour_end_to_end(tmp_path: Path) -> Non
             )
         elif name in ("Ladder", "Staircase", "Stairs"):
             cur = dict(adapter.position)
-            cur["plane"] = 2 if action == "Climb-up" else 0
+            # `PR-21.6`: one plane per rung (see T99).
+            cur["plane"] = min(2, int(cur["plane"]) + 1) if action == "Climb-up" else max(0, int(cur["plane"]) - 1)
             adapter.position = cur
         elif name == "Hopper":
             # `PR-20`: filling the hopper consumes the grain (field tick 289-349 regression).

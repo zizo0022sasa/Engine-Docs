@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 from osrs_ee.bots.base import DirectiveType, TaskDirective, TaskModule, TickContext
+from osrs_ee.bots.dialogue_text import option_matches
 from osrs_ee.bots.supply_procurement import (
     BALL_OF_WOOL_ID,
     BLUE_DYE_ID,
@@ -69,6 +70,11 @@ VERIFIED_QUEST_DIALOGUE_OPTIONS: tuple[str, ...] = (
     "Talk about something else.",
     "Talk about Romeo & Juliet.",
     "Ok, thanks.",
+    # `PR-21.6` FIELD FIX (incident #14, tick 1565): the sub-menu Romeo offers the instant the quest is
+    # accepted. Neither string was in the verified set, so the engine declared the menu unrecognised and
+    # halted a run that was 12 QP into a 13 QP bundle.
+    "Where can I find Juliet?",
+    "Is there anything else you can tell me about Juliet?",
     # Goblin Diplomacy
     # `PR-20.4` LIVE VERBATIM (Aggie's dye menu, confirmed on screen during the field run):
     "What could you make for me?",
@@ -78,6 +84,16 @@ VERIFIED_QUEST_DIALOGUE_OPTIONS: tuple[str, ...] = (
     "I have some orange armour here.",
     "I have some blue armour here.",
     "I have some brown armour here.",
+    # `PR-21.6` FIELD FIX (incident #15, ticks 617 and 474): Aggie's dye sub-menu and her exact opening
+    # line — the client punctuates it with a COMMA, the transcript did not. `normalise_option` also
+    # makes the comma irrelevant, but the verbatim string is recorded so the corpus reads correctly.
+    "Can you make dyes for me, please?",
+    "What do you need to make red dye?",
+    "What do you need to make yellow dye?",
+    "What do you need to make blue dye?",
+    "Okay, make me some red dye please.",
+    "Okay, make me some yellow dye please.",
+    "Okay, make me some blue dye please.",
     "Okay, I'll be back soon.",
     # Generic quest confirmation
     "Yes.",
@@ -160,7 +176,7 @@ class TradeUnlockQuestsTaskModule(TaskModule):
             # and are resolved strictly against Wiki-verbatim option texts for the ACTIVE item only.
             for expected in self.supply.active_dialogue_options:
                 for opt in ctx.dialogue_options:
-                    if opt.strip().casefold().rstrip(".!?") == expected.casefold().rstrip(".!?"):
+                    if option_matches(opt, expected):
                         return TaskDirective(
                             directive_type=DirectiveType.SELECT_DIALOGUE,
                             payload={"option": opt},
@@ -168,15 +184,18 @@ class TradeUnlockQuestsTaskModule(TaskModule):
                         )
             for expected in VERIFIED_QUEST_DIALOGUE_OPTIONS:
                 for opt in ctx.dialogue_options:
-                    if opt.strip().casefold().rstrip(".!?") == expected.casefold().rstrip(".!?"):
+                    if option_matches(opt, expected):
                         return TaskDirective(
                             directive_type=DirectiveType.SELECT_DIALOGUE,
                             payload={"option": opt},
                             reason=f"Selected verified quest dialogue option: {opt}",
                         )
+            # `PR-21.6`: an escalation that does not say WHAT was on screen forces a human to guess and
+            # costs a second restart. The offered options are carried verbatim, so the next field report
+            # is a one-line fix instead of an investigation.
             return TaskDirective(
                 directive_type=DirectiveType.ESCALATE_HUMAN,
-                reason="UNRECOGNIZED_QUEST_DIALOGUE_OPTION",
+                reason=f"UNRECOGNIZED_QUEST_DIALOGUE_OPTION:{list(ctx.dialogue_options)}",
             )
         return TaskDirective(
             directive_type=DirectiveType.CONTINUE_DIALOGUE,

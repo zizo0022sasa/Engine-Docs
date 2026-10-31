@@ -135,7 +135,7 @@ def test_t138_the_dye_menu_opens_with_the_live_verbatim_option() -> None:
     # An option nobody verified still escalates instead of guessing an index.
     directive = bot.evaluate_tick(_ctx(options=("A menu we have never seen.",)))
     assert directive.directive_type == DirectiveType.ESCALATE_HUMAN
-    assert directive.reason == "UNRECOGNIZED_QUEST_DIALOGUE_OPTION"
+    assert directive.reason.startswith("UNRECOGNIZED_QUEST_DIALOGUE_OPTION")
 
 
 # ---------------------------------------------------------------------------

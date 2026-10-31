@@ -150,7 +150,13 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     # her doorstep tile is `(3086,3258)`. The old node `(3087,3232)` was 26 tiles SOUTH at the
     # Draynor fishing pier — the bot talked to empty air at the water's edge.
     "DRAYNOR_AGGIE": WorldPoint(3086, 3258, 0, "DRAYNOR_AGGIE"),
-    "FALADOR_PARK": WorldPoint(3000, 3375, 0, "FALADOR_PARK"),
+    # `PR-21.6` FIELD FIX (incident #16): the old `(3000,3375)` sits by `Sir Tiffy Cashien` at the WEST
+    # edge; Wyson the gardener patrols his hut at the EAST end, ~31 tiles away — outside the client's
+    # NPC search radius, which is why `Woad leaves` stalled. Moved to the hut's approach.
+    # Provenance: FIELD-REPORTED by the operator's live session (`Wyson` NPC `5422`, hut ~`(3030,3383)`),
+    # not yet probed with `GET /npcs?name=Wyson`; the step also carries `area_radius=32`, so the bot
+    # still finds him if he wanders. Replace both with a hard probe reading if it ever stalls again.
+    "FALADOR_PARK": WorldPoint(3028, 3379, 0, "FALADOR_PARK"),
     "VARROCK_CADAVA_BUSHES": WorldPoint(3268, 3368, 0, "VARROCK_CADAVA_BUSHES"),  # pins 3264..3277
     # `PR-20.3` FIELD-PROVEN (live probe `GET /objects?name=Redberry bush` on 8081):
     #   Redberry bush id 23628 at (3272, 3375)  and  id 23628 at (3277, 3371)

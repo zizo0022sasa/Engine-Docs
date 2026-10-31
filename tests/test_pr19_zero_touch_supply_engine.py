@@ -196,7 +196,8 @@ def test_t70_zero_touch_engine_recursion_repeat_gather_and_stall_escalation() ->
             action = str(d.payload.get("action"))
             seen.append(name)
             if name in ("Ladder", "Staircase", "Stairs"):
-                plane = 2 if action == "Climb-up" else 0
+                # `PR-21.6`: one plane per rung — the mill needs two climbs each way.
+                plane = min(2, plane + 1) if action == "Climb-up" else max(0, plane - 1)
             # `PR-20`: the WORLD consumes here — the hopper eats the grain, the bin eats the pot.
             # A step is only complete once the engine can observe that on a later tick.
             if name == "Hopper":

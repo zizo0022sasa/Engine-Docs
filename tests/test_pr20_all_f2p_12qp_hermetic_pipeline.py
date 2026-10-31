@@ -169,10 +169,12 @@ def _world(command_type: str, payload: dict[str, Any], adapter: FakeGameAdapter)
                 # The Lumbridge kitchen staircase into the cellar (a different map region).
                 adapter.position = {"x": 3216, "y": 9625, "plane": 0}
             elif action == "Climb-up":
-                cur["plane"] = 2 if near_mill else 1
+                # `PR-21.6`: one plane per rung. The mill ladder walks 0->1->2; the Lumbridge
+                # staircase (single hop) is anything else, e.g. the kitchen stairs.
+                cur["plane"] = min(2, int(cur["plane"]) + 1) if near_mill else 1
                 adapter.position = cur
             else:
-                cur["plane"] = 0
+                cur["plane"] = (max(0, int(cur["plane"]) - 1) if near_mill else 0)
                 adapter.position = cur
         elif name == "Hopper":
             take(GRAIN_ID)

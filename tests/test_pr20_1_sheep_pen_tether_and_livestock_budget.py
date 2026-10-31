@@ -39,6 +39,7 @@ from osrs_ee.bots.base import DirectiveType, TickContext
 from osrs_ee.bots.quests_module import TradeUnlockQuestsTaskModule
 from osrs_ee.bots.supply_procurement import (
     BALL_OF_WOOL_ID,
+    WOAD_LEAF_ID,
     CADAVA_BERRIES_ID,
     REDBERRY_ID,
     SHEARS_ID,
@@ -315,6 +316,10 @@ def test_t127_only_the_livestock_step_declares_a_work_site_radius_or_budget() ->
         (WOOL_ID, "Sheep", "Shear"),
         (CADAVA_BERRIES_ID, "Cadava bush", "Pick"),
         (REDBERRY_ID, "Redberry bush", "Pick from"),
+        # `PR-21.6`: `Wyson the gardener` PATROLS the east end of Falador park while the route anchor
+        # is the park waypoint ~31 tiles west — the same "wandering target" shape as the sheep pen,
+        # and the same remedy. Field signature: `SUPPLY_STEP_STALLED:Woad leaves:NPC:Wyson the gardener`.
+        (WOAD_LEAF_ID, "Wyson the gardener", "Talk-to"),
     }
     found = {
         (item_id, SUPPLY_RECIPES[item_id].steps[idx].targets[0], SUPPLY_RECIPES[item_id].steps[idx].action)
