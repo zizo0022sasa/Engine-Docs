@@ -202,8 +202,11 @@ def test_t33_non_blocking_reactive_watchdog_pipelined_eat_run_move_and_keepalive
         _ = http_ad.read_observation(monotonic_ms=1050)
         _ = http_ad.read_observation(monotonic_ms=1120)
         assert http_ad.tcp_connect_count == 1
-        assert http_ad.http_request_count == 4
-        assert len(endpoint_hits) == 4
+        # `PR-22`: +1 throttled `GET /skills`. The client in this mock omits `totalLevel`, so the adapter
+        # backfills it once per 5s window (not per tick) -- the no-polling contract still holds: a second
+        # observation 70ms later costs zero extra requests.
+        assert http_ad.http_request_count == 5
+        assert len(endpoint_hits) == 5
         http_ad.kill_process_tree()
     finally:
         srv.shutdown()

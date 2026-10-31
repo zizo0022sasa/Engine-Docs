@@ -91,6 +91,12 @@ class MicrobotHttpAdapter:
         self.coalesce_window_ms = max(0, int(coalesce_window_ms))
         self.status_endpoint = status_endpoint
         self._active_status_endpoint = status_endpoint
+        # `PR-22`: `/state` is NOT guaranteed to carry `totalLevel` (the upstream `StateHandler.java`
+        # omits it, exactly as it omitted `questPoints` before `PR-18 Lite`). Without a fallback the
+        # kernel silently falls back to `32`, which makes any total-level goal unlatched forever.
+        # This throttles the `/skills` probe that fills the gap.
+        self.skills_probe_interval_ms: int = 5000
+        self._last_skills_probe_ms: int = -(10**9)
 
         self.alive = True
         self.plugin_running = False
@@ -553,6 +559,37 @@ class MicrobotHttpAdapter:
             },
             "inventory": inv_obj,
         }
+
+        # `PR-22` — TOTAL LEVEL TRANSPORT. A total-level goal (trade unlock: 100) can only latch if the
+        # number actually reaches the module. `_opt_metric` reads `/state` only, so when the client omits
+        # `totalLevel` the kernel falls back to a constant and the bot grinds forever while believing it
+        # is at level 32. The QP path already had this exact fix (`PR-18 Lite` -> `/varps?id=101`);
+        # this is the same shape for `/skills`, throttled so it cannot turn into a polling loop.
+        skills_levels: dict[str, int] = {}
+        total_quality = (obs.get("total_level") or {}).get("quality")
+        if (
+            login_state == "LOGGED_IN"
+            and total_quality == "UNKNOWN"
+            and (mono - self._last_skills_probe_ms) >= self.skills_probe_interval_ms
+        ):
+            self._last_skills_probe_ms = mono
+            snapshot = self.read_skills_snapshot()
+            raw_levels = snapshot.get("skills") or []
+            for row in raw_levels:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name", "")).strip().casefold()
+                level = row.get("level", row.get("boostedLevel"))
+                if name and isinstance(level, int) and level > 0:
+                    skills_levels[name] = int(level)
+            reported_total = int(snapshot.get("totalLevel") or 0)
+            # NEVER synthesise the total by summing the list: `/skills` may be filtered/partial (test
+            # mocks, future client builds), and a partial sum silently rewrites the account's real total.
+            # Only an explicit `totalLevel` is evidence.
+            if reported_total > 0:
+                obs["total_level"] = {"value": reported_total, "quality": "KNOWN"}
+            if skills_levels:
+                obs["skills_levels"] = skills_levels
 
         normalized_vitals = self._extract_normalized_vitals(status)
         if normalized_vitals is not None:

@@ -88,6 +88,14 @@ class ExecutionEngineKernel:
         self._active_task_id: str = ""
         self._last_known_bank_items: tuple[dict[str, Any], ...] = ()
         self._last_persisted_qp: int | None = None
+        # `PR-22` — MONOTONIC WORLD MEMORY. `total_level` and `playtime_minutes` only ever grow. The
+        # adapter reports them as `UNKNOWN` whenever the client omits the field, and the old code
+        # collapsed that into the literal fallbacks (`32` / `0`). For a total-level GOAL that is fatal in
+        # both directions: the goal never latches (stuck at 32), and even a one-tick `UNKNOWN` after a
+        # successful latch would silently un-complete a finished objective. Remember the highest value
+        # ever OBSERVED and never let noise move it backwards.
+        self._last_known_total_level: int = 0
+        self._last_known_playtime_minutes: int = 0
 
     def emit_session_started(self, *, task_id: str) -> None:
         """Emit single deduplicated `🚀 بدء جلسة حساب` notification via `BoundedOutbox`."""
@@ -409,6 +417,25 @@ class ExecutionEngineKernel:
                 except Exception:
                     pass
 
+        # `PR-22`: live skill levels must reach `AccountCapabilitiesContext`, otherwise a module that
+        # branches on a level (e.g. the mill's `Oak tree` above Woodcutting 15) keeps reading the value
+        # the account had at boot, forever.
+        live_skills = obs.get("skills_levels")
+        if isinstance(live_skills, dict) and live_skills:
+            merged = dict(self.capabilities.skills)
+            merged.update({str(k).strip().lower(): int(v) for k, v in live_skills.items() if isinstance(v, int)})
+            if merged != dict(self.capabilities.skills):
+                from dataclasses import replace as _dc_replace_skills
+
+                self.capabilities = _dc_replace_skills(self.capabilities, skills=merged)
+
+        observed_total = (obs.get("total_level") or {}).get("value")
+        if isinstance(observed_total, int) and observed_total > 0:
+            self._last_known_total_level = max(self._last_known_total_level, int(observed_total))
+        observed_playtime = (obs.get("playtime_minutes") or {}).get("value")
+        if isinstance(observed_playtime, int) and observed_playtime > 0:
+            self._last_known_playtime_minutes = max(self._last_known_playtime_minutes, int(observed_playtime))
+
         ctx = TickContext(
             game_tick=curr_tick,
             position=WorldPoint(*pos_tuple),
@@ -421,8 +448,9 @@ class ExecutionEngineKernel:
             varps=resolved_varps,
             tutorial_varp_281=_coalesce_int((obs.get("tutorial_varp_281") or {}).get("value"), 0),
             quest_points=_coalesce_int(qp_obs.get("value"), self.capabilities.quest_points),
-            total_level=_coalesce_int((obs.get("total_level") or {}).get("value"), 32),
-            playtime_minutes=_coalesce_int((obs.get("playtime_minutes") or {}).get("value"), 0),
+            # `PR-22`: unknown must mean "last value we actually saw", never a fabricated constant.
+            total_level=max(32, self._last_known_total_level),
+            playtime_minutes=max(0, self._last_known_playtime_minutes),
             bank_is_open=bank_is_open,
             bank_items=bank_items_tuple,
             in_danger=safety.in_danger,

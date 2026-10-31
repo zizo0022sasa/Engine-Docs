@@ -406,7 +406,7 @@ def test_t41_tutorial_island_non_ironman_guard_and_12qp_trade_unlock_quest_chain
 def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_path: Path) -> None:
     """T42: `TotalLevel100TaskModule` (`stage1b_seasoning_gatherer`):
     1. Rotates safely between `WOODCUTTING` (`LUMBRIDGE_WEST_TREES`) and `FISHING_COOKING`
-       (`LUMBRIDGE_SWAMP_FISHING` -> `LUMBRIDGE_KITCHEN` Cooking range -> Bank Turnaround).
+       (`LUMBRIDGE_SWAMP_FISHING` -> live-proven `Fire` + widget `270:14` -> Bank Turnaround).
     2. Latches immediately once `total_level >= 100` AND `playtime_minutes >= 1200`, banks items, and completes!
     """
     store, adapter, _gate, kernel = _make_kernel_env(
@@ -420,12 +420,13 @@ def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_pat
         ],
     )
     adapter.position = {"x": 3185, "y": 3436, "plane": 0}  # Varrock West Bank
-    cooked_on_range = False
+    cooked_on_fire = False
+    cooked_via_widget = False
 
     orig_exec = adapter.execute_raw_command
 
     def _sim_seasoning(cmd_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        nonlocal cooked_on_range
+        nonlocal cooked_on_fire, cooked_via_widget
         res = orig_exec(cmd_type, payload)
         if cmd_type == "INTERACT_OBJECT" and payload.get("action") == "Chop down":
             # Fill inventory with 27 Oak logs (+ 1 Bronze axe = 28 slots)
@@ -440,8 +441,14 @@ def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_pat
                 adapter.inventory_items.append(
                     {"item_id": 317, "name": "Raw shrimps", "quantity": 1, "noted": False}
                 )
-        elif cmd_type == "INTERACT_OBJECT" and payload.get("name") == "Cooking range":
-            cooked_on_range = True
+        elif cmd_type == "INTERACT_OBJECT" and payload.get("name") == "Fire":
+            # `PR-22` FIELD FIX: the live-proven cook target is the Barbarian Village fire (3078,3445) and
+            # the Cook-All chatbox widget `270:14` -- NOT an unverified "Cooking range" object name.
+            assert (payload.get("target_x"), payload.get("target_y")) == (3078, 3445)
+            cooked_on_fire = True
+        elif cmd_type == "WIDGET_CLICK":
+            assert payload.get("groupId") == 270 and payload.get("childId") == 14
+            cooked_via_widget = True
             adapter.inventory_items = [
                 {"item_id": 303, "name": "Small fishing net", "quantity": 1, "noted": False},
                 *[
@@ -449,7 +456,7 @@ def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_pat
                     for _ in range(27)
                 ],
             ]
-            # Reach Total Level 100 + 1200 minutes playtime right on cooking batch!
+            # Reach Total Level 100 + 1200 minutes playtime right on the cooking batch!
             adapter.total_level = 100
             adapter.playtime_minutes = 1201
         return res
@@ -459,7 +466,7 @@ def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_pat
     try:
         mod = TotalLevel100TaskModule(target_total_level=100, target_playtime_minutes=1200)
         done = False
-        for step in range(1, 120):
+        for step in range(1, 420):  # `PR-22`: the live fire is a long walk from the swamp
             r = kernel.step_tick(mod, now_monotonic=float(step))
             if r.halted:
                 assert r.task_directive is not None
@@ -467,7 +474,7 @@ def test_t42_total_level_100_seasoning_rotation_and_immediate_tick_latch(tmp_pat
                 done = True
                 break
         assert done is True
-        assert cooked_on_range is True
+        assert cooked_on_fire is True and cooked_via_widget is True
         assert mod.completed_rotation_batches >= 1
         assert len(adapter.inventory_items) == 0  # Final batch banked cleanly!
     finally:

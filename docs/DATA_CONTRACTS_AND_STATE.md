@@ -128,6 +128,12 @@ REJECTED (فشل الشرط المسبق أو انتهى الإيجار/الجي
     "value": 420,
     "quality": "KNOWN"
   },
+  "skills_levels": {
+    "hitpoints": 10,
+    "woodcutting": 22,
+    "fishing": 12,
+    "cooking": 9
+  },
   "dialogue_open": false,
   "bank": {
     "is_open": false,
@@ -203,3 +209,11 @@ REJECTED (فشل الشرط المسبق أو انتهى الإيجار/الجي
   "requires_human_approval": true
 }
 ```
+
+---
+
+> `skills_levels` (`PR-22`): خريطة اختيارية بأسماء مهارات lowercase ومستوياتها الحية، تُغذّى من
+> `GET /skills` مرة كل 5 ثوانٍ حين يُسقط `/state` حقل `totalLevel`. يستخدمها
+> `ExecutionEngineKernel` لتحديث `AccountCapabilitiesContext` وسط التشغيل، وليست بديلاً عن
+> `total_level` (الرقم الرسمي يبقى هو المصدر).
+

@@ -276,8 +276,19 @@ class FakeGameAdapter:
             },
             "tutorial_varp_281": {"value": self.tutorial_varp_281, "quality": "KNOWN"},
             "quest_points": {"value": self.quest_points, "quality": "KNOWN"},
-            "total_level": {"value": self.total_level, "quality": "KNOWN"},
-            "playtime_minutes": {"value": self.playtime_minutes, "quality": "KNOWN"},
+            # `PR-22`: the fake must be able to lie the way the REAL client does. Upstream omits these
+            # fields, and a simulator that can only ever answer KNOWN cannot reproduce the defect that
+            # made a total-level goal unreachable. `None` now means exactly what the wire means: UNKNOWN.
+            "total_level": (
+                {"value": int(self.total_level), "quality": "KNOWN"}
+                if self.total_level is not None
+                else {"value": None, "quality": "UNKNOWN"}
+            ),
+            "playtime_minutes": (
+                {"value": int(self.playtime_minutes), "quality": "KNOWN"}
+                if self.playtime_minutes is not None
+                else {"value": None, "quality": "UNKNOWN"}
+            ),
             "dialogue_open": bool(self.dialogue_open),
             "bank": {
                 "is_open": self.bank_open,

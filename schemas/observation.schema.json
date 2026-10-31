@@ -25,87 +25,263 @@
     "inventory"
   ],
   "properties": {
-    "schema_version": {"type": "string", "const": "1.0"},
-    "observation_id": {"type": "string", "minLength": 3},
-    "observed_at": {"type": "string", "minLength": 10},
-    "monotonic_ms": {"type": "integer", "minimum": 0},
-    "account_id": {"type": "string", "pattern": "^acc_[a-z0-9_]+$"},
-    "session_id": {"type": "string", "minLength": 4},
-    "client_instance_id": {"type": "string", "minLength": 4},
-    "session_epoch": {"type": "integer", "minimum": 1},
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "observation_id": {
+      "type": "string",
+      "minLength": 3
+    },
+    "observed_at": {
+      "type": "string",
+      "minLength": 10
+    },
+    "monotonic_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "account_id": {
+      "type": "string",
+      "pattern": "^acc_[a-z0-9_]+$"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 4
+    },
+    "client_instance_id": {
+      "type": "string",
+      "minLength": 4
+    },
+    "session_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
     "login_state": {
       "type": "string",
-      "enum": ["LOGIN_SCREEN", "LOGGING_IN", "LOGGED_IN", "CONNECTION_LOST", "DISABLED_SCREEN", "UNKNOWN"]
+      "enum": [
+        "LOGIN_SCREEN",
+        "LOGGING_IN",
+        "LOGGED_IN",
+        "CONNECTION_LOST",
+        "DISABLED_SCREEN",
+        "UNKNOWN"
+      ]
     },
-    "game_tick": {"type": ["integer", "null"], "minimum": 0},
-    "world": {"type": ["integer", "null"], "minimum": 301, "maximum": 699},
+    "game_tick": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "world": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 301,
+      "maximum": 699
+    },
     "position": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["x", "y", "plane", "quality"],
+      "required": [
+        "x",
+        "y",
+        "plane",
+        "quality"
+      ],
       "properties": {
-        "x": {"type": ["integer", "null"], "minimum": 0},
-        "y": {"type": ["integer", "null"], "minimum": 0},
-        "plane": {"type": ["integer", "null"], "minimum": 0, "maximum": 3},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]}
+        "x": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "y": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "plane": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        }
       }
     },
     "tutorial_varp_281": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["value", "quality"],
+      "required": [
+        "value",
+        "quality"
+      ],
       "properties": {
-        "value": {"type": ["integer", "null"], "minimum": 0},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]}
+        "value": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        }
       }
     },
     "quest_points": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["value", "quality"],
+      "required": [
+        "value",
+        "quality"
+      ],
       "properties": {
-        "value": {"type": ["integer", "null"], "minimum": 0},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]}
+        "value": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        }
       }
     },
     "total_level": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["value", "quality"],
+      "required": [
+        "value",
+        "quality"
+      ],
       "properties": {
-        "value": {"type": ["integer", "null"], "minimum": 0},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]}
+        "value": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        }
       }
     },
     "playtime_minutes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["value", "quality"],
+      "required": [
+        "value",
+        "quality"
+      ],
       "properties": {
-        "value": {"type": ["integer", "null"], "minimum": 0},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]}
+        "value": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        }
       }
     },
-    "dialogue_open": {"type": "boolean"},
+    "dialogue_open": {
+      "type": "boolean"
+    },
     "bank": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["is_open", "pin_prompt_open", "items_quality", "items"],
+      "required": [
+        "is_open",
+        "pin_prompt_open",
+        "items_quality",
+        "items"
+      ],
       "properties": {
-        "is_open": {"type": "boolean"},
-        "pin_prompt_open": {"type": "boolean"},
-        "items_quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]},
+        "is_open": {
+          "type": "boolean"
+        },
+        "pin_prompt_open": {
+          "type": "boolean"
+        },
+        "items_quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        },
         "items": {
-          "type": ["array", "null"],
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["item_id", "name", "quantity", "noted"],
+            "required": [
+              "item_id",
+              "name",
+              "quantity",
+              "noted"
+            ],
             "properties": {
-              "item_id": {"type": "integer", "minimum": 0},
-              "name": {"type": "string", "minLength": 1},
-              "quantity": {"type": "integer", "minimum": 1},
-              "noted": {"type": "boolean"}
+              "item_id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "noted": {
+                "type": "boolean"
+              }
             }
           }
         }
@@ -114,21 +290,58 @@
     "inventory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["free_slots", "quality", "items"],
+      "required": [
+        "free_slots",
+        "quality",
+        "items"
+      ],
       "properties": {
-        "free_slots": {"type": ["integer", "null"], "minimum": 0, "maximum": 28},
-        "quality": {"type": "string", "enum": ["KNOWN", "UNKNOWN", "STALE"]},
+        "free_slots": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 28
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "KNOWN",
+            "UNKNOWN",
+            "STALE"
+          ]
+        },
         "items": {
-          "type": ["array", "null"],
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["item_id", "name", "quantity", "noted"],
+            "required": [
+              "item_id",
+              "name",
+              "quantity",
+              "noted"
+            ],
             "properties": {
-              "item_id": {"type": "integer", "minimum": 0},
-              "name": {"type": "string", "minLength": 1},
-              "quantity": {"type": "integer", "minimum": 1},
-              "noted": {"type": "boolean"}
+              "item_id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quantity": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "noted": {
+                "type": "boolean"
+              }
             }
           }
         }
@@ -137,13 +350,50 @@
     "vitals": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hp_current", "hp_max", "run_energy", "run_enabled", "under_attack"],
+      "required": [
+        "hp_current",
+        "hp_max",
+        "run_energy",
+        "run_enabled",
+        "under_attack"
+      ],
       "properties": {
-        "hp_current": {"type": ["integer", "null"], "minimum": 0},
-        "hp_max": {"type": ["integer", "null"], "minimum": 1},
-        "run_energy": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000},
-        "run_enabled": {"type": "boolean"},
-        "under_attack": {"type": "boolean"}
+        "hp_current": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "hp_max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "run_energy": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "run_enabled": {
+          "type": "boolean"
+        },
+        "under_attack": {
+          "type": "boolean"
+        }
+      }
+    },
+    "skills_levels": {
+      "type": "object",
+      "description": "PR-22: live per-skill levels keyed by lower-cased skill name, surfaced from the throttled `GET /skills` probe that also backfills `total_level` when `/state` omits `totalLevel`. Consumed by ExecutionEngineKernel to refresh AccountCapabilitiesContext mid-run.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
       }
     }
   }
