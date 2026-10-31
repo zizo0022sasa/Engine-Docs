@@ -1655,3 +1655,77 @@ ceiling that comfortably covers the whole bundle and let it finish early:
 ```
 --max-ticks 12000
 ```
+
+---
+
+## 30. `PR-21.5` — Incident #16: the cellar object tile, and the ring that could not reach it
+
+### 30.1 The live log
+
+```
+[Walker] walk rejected: target WorldPoint(x=3216, y=9625, plane=0) has no walkable tile within 0
+    in the collision map (nearest walkable WorldPoint(x=3215, y=9624, plane=0));
+    check the destination coordinate
+```
+
+The bot stood still in the Lumbridge cellar. Two defects, one visible and one structural.
+
+### 30.2 Defect 1 — the anchor was an object tile
+
+`LUMBRIDGE_CASTLE_BASEMENT` pointed at `(3216,9625)`: the tile the **bucket spawns on**. An object tile
+is never a walkable destination, and `Rs2Walker` refuses the whole walk (`threshold = 0`).
+
+This is the **fifth** member of the coordinate family — dairy cow `(3172,3317)` → `(3171,3316)`
+(`PR-19.3`), the Al Kharid throne room (`PR-19.6`), the redberry bushes (`PR-20.3`), Aggie's doorstep
+(`PR-20.4`), and now the cellar. The rule has not changed: **the probe is truth; the wiki, and our own
+first guess, are hints.** The anchor is now `(3215,9624)` — the neighbour the client itself named.
+
+### 30.3 Defect 2 — the self-healing ring was switched off exactly where it was needed
+
+`PR-19.3` added `FINAL_TARGET_SNAP_OFFSETS`: when a route stalls on its **final** waypoint, rotate the
+destination through a deterministic ring until the client accepts a tile. Correct fix, wrong gate:
+
+```python
+if (
+    current_pos.y < 5000          # <-- surface only
+    and on_final_waypoint
+    and prog.stationary_ticks >= self.max_stalled_ticks_before_reroute
+):
+```
+
+The gate was there to protect the underground **5-tick recovery contract**. The consequence: the ring
+was unreachable **in the one region where destinations are objects** — the whole Lumbridge cellar is
+`9xxx` coordinates. A guard built to fix "the destination itself is unwalkable" was disabled precisely
+where destinations are unwalkable objects.
+
+Fix: give underground the **same fast budget** its reroute already uses, instead of excluding the region.
+
+```python
+snap_budget = min(5, self.max_stalled_ticks_before_reroute) if current_pos.y >= 5000 \
+              else self.max_stalled_ticks_before_reroute
+if on_final_waypoint and prog.stationary_ticks >= snap_budget:
+```
+
+The contract is preserved (`T166b` proves rotation still arrives inside ~5 ticks) and the ring works
+below ground (`T166`).
+
+### 30.4 Why this matters more than the tile
+
+Without defect 2, defect 1 is a **halt**. With it fixed, defect 1 would have been a **nuisance**: the
+ring rotates `(3216,9625)` → `(3215,9624)` on its own and the bot carries on. Fixing the coordinate
+alone would have left the same class of halt waiting for the next object tile — and the next one is
+already known (`LUMBRIDGE_WINDMILL_TOP`, the mill hopper, the goblin crates are all object tiles).
+
+Both are fixed. The coordinate is corrected because the anchor should describe reality; the ring is
+enabled because no anchor will ever be right about every tile on the map.
+
+### 30.5 Verification
+
+| test | guarantee |
+|---|---|
+| `T165` | anchor == the walker-accepted neighbour, ≠ the object tile, and inside the cellar rectangle (T101 discipline) |
+| `T166` | the ring rotates a rejected destination **underground** (the live signature, replayed at `y=9625`) |
+| `T166b` | rotation still arrives within the fast (~5 tick) underground window |
+| `T167` | the bucket is still collected: `PICKUP` is name-resolved, so moving the anchor one tile costs nothing |
+
+Full suite: **`167 passed`**, `0 failed` (`T01..T146`, `T157..T167`).

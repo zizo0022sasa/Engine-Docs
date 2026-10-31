@@ -235,7 +235,10 @@ SUPPLY_RECIPES: dict[int, SupplyRecipe] = {
                 targets=("Bucket",),
                 action="Take",
                 produces=((BUCKET_ID, 1),),
-                note="bucket spawn in the Lumbridge Castle basement (3216,9625)",
+                # `PR-21.5`: the bucket still SPAWNS at `(3216,9625)` — but that tile is an object,
+                # not a destination. The bot walks to the walkable neighbour `(3215,9624)` and takes
+                # the bucket by name, exactly as the live rejection message instructed.
+                note="bucket spawn (3216,9625); anchor tile (3215,9624) is its walkable neighbour",
             ),
             SupplyStep(
                 kind=SupplyStepKind.EXIT_UNDERGROUND,

@@ -131,7 +131,13 @@ DEFAULT_WORLD_NODES: dict[str, WorldPoint] = {
     "LUMBRIDGE_CASTLE_NORTH_STAIRS": WorldPoint(3205, 3227, 0, "LUMBRIDGE_CASTLE_NORTH_STAIRS"),
     "LUMBRIDGE_SPINNING_WHEEL": WorldPoint(3209, 3212, 1, "LUMBRIDGE_SPINNING_WHEEL"),  # plane 1
     "BARBARIAN_SPINNING_WHEEL": WorldPoint(3081, 3430, 0, "BARBARIAN_SPINNING_WHEEL"),  # plane-0 fallback
-    "LUMBRIDGE_CASTLE_BASEMENT": WorldPoint(3216, 9625, 0, "LUMBRIDGE_CASTLE_BASEMENT"),  # bucket spawn
+    # `PR-21.5` FIELD-CORRECTED (live `Rs2Walker` rejection, `ZizoScouttt` run):
+    #   "target WorldPoint(x=3216, y=9625, plane=0) has no walkable tile within 0 in the collision
+    #    map (nearest walkable WorldPoint(x=3215, y=9624, plane=0))"
+    # `(3216,9625)` is an OBJECT tile (the bucket spawn), never a walkable destination. The anchor is
+    # the walkable neighbour the client itself named. Fifth member of the coordinate family — the same
+    # rule as every one before it: the probe is the truth, the wiki (and our own first guess) is a hint.
+    "LUMBRIDGE_CASTLE_BASEMENT": WorldPoint(3215, 9624, 0, "LUMBRIDGE_CASTLE_BASEMENT"),
     # `PR-19.6` FIELD-CORRECTED (`acc_02` live probe). The old values (3307,3163) landed INSIDE the
     # Al Kharid Palace throne room — the bot literally tried to pick wheat next to a `Throne (1108)`.
     # Lumbridge windmill ground truth: wheat object `15506` "Pick" at (3162,3296); mill `Large door`
@@ -751,13 +757,18 @@ class NavigationEngine:
         # that is the exact field signature (`walk rejected: target ... not walkable`). Mid-route jams
         # are geometry problems and stay with the edge-blacklist/reroute machinery below, so the snap
         # ring is never spent on something it cannot fix. Micro-routes have len==2, so they qualify too.
-        # Surface only (underground keeps its 5-tick recovery contract untouched), and gated on the SAME
-        # 20-tick surface budget as the generic reroute so no existing behaviour fires earlier.
-        if (
-            current_pos.y < 5000
-            and on_final_waypoint
-            and prog.stationary_ticks >= self.max_stalled_ticks_before_reroute
-        ):
+        # `PR-21.5`: the ring now applies UNDERGROUND too. `PR-19.3` gated it on `y < 5000` to protect
+        # the underground 5-tick recovery contract — but that made the ring unreachable exactly where
+        # the walker rejects destinations most often: every cell of the Lumbridge cellar is a `9xxx`
+        # coordinate, and the live rejection was `target (3216,9625) ... no walkable tile`. The contract
+        # is preserved by giving the region the SAME fast budget the underground reroute already uses,
+        # instead of excluding it. An object tile can be unwalkable anywhere — surface or below.
+        snap_budget = (
+            min(5, self.max_stalled_ticks_before_reroute)
+            if current_pos.y >= 5000
+            else self.max_stalled_ticks_before_reroute
+        )
+        if on_final_waypoint and prog.stationary_ticks >= snap_budget:
             # `PR-19.3` SYSTEMIC FIX: the client refuses a destination whose tile is not walkable in the
             # collision map ("target-not-walkable", live `Rs2Walker` telemetry on the dairy cow tile).
             # Edge blacklisting cannot help here — the problem is the DESTINATION itself — so rotate
