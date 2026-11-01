@@ -370,3 +370,60 @@ def test_t178b_the_goal_needs_both_gates_not_either() -> None:
     for total, playtime in ((100, 100), (90, 1300)):
         directive = mod.evaluate_tick(_ctx(inventory=(), total_level=total, playtime_minutes=playtime))
         assert directive.directive_type != DirectiveType.COMPLETE_TASK, (total, playtime)
+
+
+# ---------------------------------------------------------------------------
+# T179 — a fish landing must never be interrupted by a re-click (PR-22.1)
+# ---------------------------------------------------------------------------
+def test_t179_a_catch_resets_the_net_timer_instead_of_triggering_a_re_click() -> None:
+    """T179 (`PR-22.1`): field report from the 13-batch run on 8081.
+
+    The module re-dispatched `Net` every 7 ticks regardless of what the world was doing, and a re-click
+    cancels the cast already in flight — the same defect family as interrupting the cook animation.
+    While fish keep landing there must be exactly ONE click.
+    """
+    from osrs_ee.bots.seasoning_module import FISH_REDISPATCH_TICKS
+
+    mod = TotalLevel100TaskModule(allow_woodcutting=False)
+    mod._tool_probe_done = True
+    net = {"item_id": SMALL_FISHING_NET_ID, "name": "Small fishing net", "quantity": 1}
+    clicked = False
+    raw = 0
+    clicks = 0
+    for tick in range(1, 41):
+        inventory = (net,) + tuple(
+            {"item_id": 317, "name": "Raw shrimps", "quantity": 1} for _ in range(raw)
+        )
+        directive = mod.evaluate_tick(_ctx(inventory=inventory, pos=(3243, 3152), tick=tick))
+        if directive.directive_type == DirectiveType.INTERACT_NPC:
+            clicks += 1
+            clicked = True
+        elif clicked and tick % 2 == 0:
+            raw += 1  # a fish lands every other tick while the net is in the water
+
+    assert clicks == 1, (
+        f"{clicks} Net dispatches while fish kept landing — every extra click cancels a live cast"
+    )
+    assert FISH_REDISPATCH_TICKS == 10
+
+
+def test_t179b_a_barren_spot_is_still_re_dispatched() -> None:
+    """T179b (`PR-22.1`): the anti-interruption guard must never become a livelock.
+
+    If nothing is caught for `FISH_REDISPATCH_TICKS`, the bot clicks again — otherwise a moved/depleted
+    fishing spot would freeze the whole sprint.
+    """
+    from osrs_ee.bots.seasoning_module import FISH_REDISPATCH_TICKS
+
+    mod = TotalLevel100TaskModule(allow_woodcutting=False)
+    mod._tool_probe_done = True
+    net = {"item_id": SMALL_FISHING_NET_ID, "name": "Small fishing net", "quantity": 1}
+    dispatched_ticks: list[int] = []
+    for tick in range(1, 4 * FISH_REDISPATCH_TICKS + 1):
+        directive = mod.evaluate_tick(_ctx(inventory=(net,), pos=(3243, 3152), tick=tick))
+        if directive.directive_type == DirectiveType.INTERACT_NPC:
+            dispatched_ticks.append(tick)
+
+    assert len(dispatched_ticks) >= 3, dispatched_ticks
+    gaps = [b - a for a, b in zip(dispatched_ticks, dispatched_ticks[1:])]
+    assert all(gap >= FISH_REDISPATCH_TICKS for gap in gaps), gaps

@@ -68,6 +68,12 @@ COOK_TARGETS: dict[str, tuple[str, str, str]] = {
     "lumbridge_range": ("LUMBRIDGE_KITCHEN", "Range", "Cook"),
 }
 
+#: `PR-22.1` — ticks to wait before RE-CLICKING a fishing spot that has produced nothing.
+#: Re-clicking a live spot cancels the catch already in progress (same family as interrupting the cook
+#: animation on tick 290). Field measurement from the 13-batch run: a 7-tick unconditional re-dispatch
+#: kept resetting the net. A catch that LANDS resets the timer instead of triggering a click.
+FISH_REDISPATCH_TICKS = 10
+
 #: Words that identify the fishing-tutor handout inside a dialogue menu (live `PR-15` behaviour).
 _FISHING_TUTOR_HINTS: tuple[str, ...] = ("net", "shrimp", "fish", "yes", "okay", "sure")
 
@@ -392,7 +398,18 @@ class TotalLevel100TaskModule(TaskModule):
                 reason="Claiming the free Small fishing net (303) from the Lumbridge Fishing tutor",
             )
 
-        if ctx.game_tick - self._last_action_tick < 7:
+        # `PR-22.1` FIELD FIX (13-batch run on 8081): a fish landing is PROOF the net is working. The old
+        # code re-dispatched `Net` every 7 ticks unconditionally, which cancels the cast in progress and
+        # halves throughput. Measure the world, then decide: catch -> wait; no catch for
+        # `FISH_REDISPATCH_TICKS` -> click again (so a dead spot still recovers instead of livelocking).
+        if raw_qty > self._last_raw_fish_qty:
+            self._last_raw_fish_qty = raw_qty
+            self._last_action_tick = ctx.game_tick
+            return TaskDirective(
+                directive_type=DirectiveType.WAIT_NEXT_TICK,
+                reason=f"Net fishing: {raw_qty} raw caught ({free_slots} free slots) — not re-clicking",
+            )
+        if ctx.game_tick - self._last_action_tick < FISH_REDISPATCH_TICKS:
             return TaskDirective(
                 directive_type=DirectiveType.WAIT_NEXT_TICK,
                 reason=f"Net fishing in progress ({raw_qty} raw, {free_slots} free slots)",
