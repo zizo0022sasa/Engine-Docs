@@ -977,9 +977,18 @@ should not resume at 2 HP. Wait for full HP (or stage food with `--require-food-
 
 ### 21.1 What the field actually lost
 
-Incident #10 killed the account. OSRS keeps only the three most valuable items on death, so the bot
-respawned in Lumbridge with `Red dye` + `Shears` + **1 GP**; the other 54 GP of Fred's reward stayed on
-the ground. Outstanding dye budget: `5 (yellow) + 20 (woad) + 5 (blue) = 30 GP`.
+> ⚠️ **`CORRECTED` 2026-11-01 (`docs/ACCOUNT_REGISTER.md` §2).** This section used to open with
+> *"Incident #10 killed the account."* It did not. These were **two separate events**, and merging them
+> misattributes the compensation:
+>
+> * **the death** — a **Highwayman** hit (`HANDOFF.md` §31). OSRS keeps only the three most valuable
+>   items, so the bot respawned in Lumbridge with **`Red dye` + `Shears` + 1 GP** and lost **54 GP**;
+> * **incident #10** — the `Varp 62 == 0` gate (§20), which sent a level-3 account **250 tiles** toward
+>   `General Bentnoze` with an empty bag. It took a wizard hit at the Draynor crossroad (`HP 10 -> 2`)
+>   and was **rescued by the operator, alive**, into Draynor bank.
+
+Fred's `60 GP` was real; 54 of it was dropped on the ground by the death. Outstanding dye budget:
+`5 (yellow) + 20 (woad) + 5 (blue) = 30 GP`.
 
 ### 21.2 The two field proposals, and why one of them is off the table
 
